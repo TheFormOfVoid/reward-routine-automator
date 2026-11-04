@@ -1,17 +1,18 @@
-import { StrictMode, useCallback, useMemo, useState } from 'react'
+import { lazy, StrictMode, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { getSettings } from '../../shared/settings.ts'
-import { applyTheme } from '../../theme/apply.ts'
 import { Background } from '../../popup/fx/Background.tsx'
 import { useSettings } from '../../popup/hooks/useSettings.ts'
 import { useRunState } from '../../popup/hooks/useRunState.ts'
-import { sendMessage } from '../../shared/messages.ts'
-import type { Message, MessageResponse } from '../../shared/messages.ts'
-import { Settings as SettingsView } from '../../popup/views/Settings.tsx'
+import { useMessage } from '../../popup/hooks/useMessage.ts'
+import { useTheme } from '../../popup/hooks/useTheme.ts'
+import { useMotionEnabled } from '../../popup/fx/motion-presets.ts'
+import { StorageGate } from '../../popup/components/StorageGate.tsx'
+import { ViewBoundary } from '../../popup/components/ViewBoundary.tsx'
 import { GearIcon } from '../../popup/components/icons.tsx'
+import { RewardsLink } from '../../popup/components/RewardsLink.tsx'
+import { NotificationCard } from '../../popup/components/NotificationCard.tsx'
 import { DashboardCtx } from './ctx.tsx'
 import type { DashboardWiring } from './ctx.tsx'
-import { DashboardGrid } from './layout/GridLayout.tsx'
 import { FinishOverlay, readFinishSummary } from './FinishOverlay.tsx'
 import '../../theme/tokens.css'
 import '../../theme/backgrounds.css'
@@ -42,8 +43,14 @@ import './dashboard.css'
 // registry (tiles/registry.ts) is the single data source for sizes and the
 // default board.
 
-function DashboardPage({ animate }: { animate: boolean }) {
-  const { settings, save } = useSettings()
+const loadGrid = () => import('./layout/GridLayout.tsx').then((module) => ({ default: module.DashboardGrid }))
+const DashboardGrid = lazy(loadGrid)
+const SettingsView = lazy(() => import('../../popup/views/Settings.tsx').then((module) => ({ default: module.Settings })))
+
+function DashboardPage() {
+  const { settings, save, loaded, error, retry } = useSettings()
+  useTheme(settings)
+  const animate = useMotionEnabled(settings.animationsEnabled && !settings.lowPowerMode)
   const runState = useRunState()
   // The routine's finish screen (6.8.0): the worker opens the dashboard with
   // the summary in the query (?q=/?s=, ?dev for the Developer-Option preview).
@@ -52,22 +59,33 @@ function DashboardPage({ animate }: { animate: boolean }) {
   // query and shows it again; Done strips the query, so a reload after lands
   // on the plain board.
   const [finish, setFinish] = useState(readFinishSummary)
+  const gear = useRef<HTMLButtonElement>(null)
+  const focusAfterFinish = useRef(false)
+  useEffect(() => {
+    if (!finish || !loaded) return
+    // Load code after the finish card paints. The covered grid's hooks and
+    // effects start only after Done, so it consumes no background work.
+    const timer = window.setTimeout(() => { void loadGrid().catch(() => {}) }, 500)
+    return () => window.clearTimeout(timer)
+  }, [finish, loaded])
   const closeFinish = useCallback(() => {
+    focusAfterFinish.current = true
     setFinish(null)
     history.replaceState(null, '', window.location.pathname)
   }, [])
+  useEffect(() => {
+    if (!finish && focusAfterFinish.current) {
+      gear.current?.focus()
+      focusAfterFinish.current = false
+    }
+  }, [finish])
   // The gear's settings surface (user request, 2026-09-09): the dashboard's
   // content swaps for the same settings the popup edits, distributed across
   // the full width.
   const [settingsOpen, setSettingsOpen] = useState(false)
   // The run controls' in-flight marker (the popup's Run view's `busy`): one
   // message at a time, so each button disables itself while its action runs.
-  const [busy, setBusy] = useState<Message['type'] | null>(null)
-  // Stable identity so the wiring memo below only moves on real state changes.
-  const send = useCallback((message: Message): Promise<MessageResponse> => {
-    setBusy(message.type)
-    return sendMessage(message).finally(() => setBusy(null))
-  }, [])
+  const { send, busy, error: commandError, clearError } = useMessage()
 
   // One stable context value: rebuilt only when a field the tiles actually
   // read moves (busy per action, runState per tick, settings on save) — not on
@@ -79,13 +97,18 @@ function DashboardPage({ animate }: { animate: boolean }) {
     [settings, save, runState, send, busy, animate],
   )
 
+  if (!loaded) return <StorageGate error={error} retry={retry} />
+
   return (
-    <div className="dash">
-      <Background style={settings.background} animate={animate} />
+    <div className="dash" data-low-power={settings.lowPowerMode || undefined}>
+      {!finish && <Background style={settings.background} animate={animate} />}
+      {commandError && !finish && <NotificationCard className="action-feedback action-feedback--dashboard" urgent onDismiss={clearError} dismissLabel="Dismiss action message">{commandError}</NotificationCard>}
+      {!finish && <RewardsLink className="dash-rewards" />}
 
       {/* The gear, pinned top-right over whatever content is showing — the
        * dashboard's own way into its settings surface. */}
-      <button
+      {!finish && <button
+        ref={gear}
         className="icon-btn dash-gear"
         aria-label="Settings"
         title="Settings"
@@ -93,9 +116,9 @@ function DashboardPage({ animate }: { animate: boolean }) {
         onClick={() => setSettingsOpen((v) => !v)}
       >
         <GearIcon />
-      </button>
+      </button>}
 
-      {settingsOpen ? (
+      {!finish && <ViewBoundary><Suspense fallback={<div className="view-loading" role="status">Opening dashboard…</div>}>{settingsOpen ? (
         <div className="dash-settings">
           <SettingsView settings={settings} save={save} motionOn={animate} />
         </div>
@@ -103,7 +126,7 @@ function DashboardPage({ animate }: { animate: boolean }) {
         <DashboardCtx.Provider value={wiring}>
           <DashboardGrid animate={animate} />
         </DashboardCtx.Provider>
-      )}
+      )}</Suspense></ViewBoundary>}
 
       {/* The finish overlay last and topmost: it covers the gear, the
        * settings surface and the board alike until the user presses Done. */}
@@ -121,29 +144,4 @@ function DashboardPage({ animate }: { animate: boolean }) {
 
 const root = document.getElementById('root')
 
-// The mounting pattern from confirm/main.tsx: the theme applies before the
-// first paint (settings read, a few ms), the hydration gate renders null
-// until useSettings sees the stored blob — same rule as the popup's App.
-// A storage failure still mounts with defaults (useSettings merges them).
-getSettings()
-  .then((s) => {
-    applyTheme(s)
-    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    const animate = s.animationsEnabled && !s.lowPowerMode && !reduce
-    if (root) {
-      createRoot(root).render(
-        <StrictMode>
-          <DashboardPage animate={animate} />
-        </StrictMode>,
-      )
-    }
-  })
-  .catch(() => {
-    if (root) {
-      createRoot(root).render(
-        <StrictMode>
-          <DashboardPage animate={false} />
-        </StrictMode>,
-      )
-    }
-  })
+if (root) createRoot(root).render(<StrictMode><DashboardPage /></StrictMode>)

@@ -31,6 +31,8 @@ export function useDash(): DashboardWiring {
 
 export interface GridMode {
   editing: boolean
+  hide?: (id: string) => void
+  resize?: (id: string, w: number, h: number) => void
 }
 
 export const GridCtx = createContext<GridMode>({ editing: false })

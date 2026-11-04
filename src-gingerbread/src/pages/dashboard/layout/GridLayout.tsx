@@ -43,6 +43,9 @@ import { GridCtx } from '../ctx.tsx'
 import { migrate, toDoc } from './migrate.ts'
 import type { RGLItem } from './migrate.ts'
 import { snapToStep } from './snap.ts'
+import { WidgetChooser } from '../../../popup/components/WidgetChooser.tsx'
+import { NotificationCard } from '../../../popup/components/NotificationCard.tsx'
+import { DASH_HIDDEN_KEY, mergeVisibleGeometry, normalizeHidden } from './visibility.ts'
 
 // The tile components, keyed by registry id — the board renders straight
 // from this map, so adding a tile is a registry entry + a component.
@@ -109,6 +112,30 @@ export const DashboardGrid = memo(function DashboardGrid({ animate }: { animate:
   // default board no matter what was stored).
   const [items, setItems] = useState<RGLItem[] | null>(null)
   const board = items ?? storedItems
+  const visibility = useStorageValue<unknown>('local', DASH_HIDDEN_KEY, [])
+  const hidden = useMemo(() => new Set(normalizeHidden(visibility.value)), [visibility.value])
+  const visibleBoard = board.filter(item => !hidden.has(item.i))
+  const boardRef = useRef(board)
+  boardRef.current = board
+  const hiddenRef = useRef(hidden)
+  hiddenRef.current = hidden
+  const visibilityWrites = useRef<Promise<unknown>>(Promise.resolve())
+  const [layoutError, setLayoutError] = useState<string | null>(null)
+  function changeVisibility(id: string, visible: boolean) {
+    visibilityWrites.current = visibilityWrites.current.then(async () => {
+      const saved = await chrome.storage.local.get(DASH_HIDDEN_KEY)
+      const next = new Set(normalizeHidden(saved[DASH_HIDDEN_KEY]))
+      if (visible) next.delete(id); else if (PANEL_IDS.includes(id as typeof PANEL_IDS[number])) next.add(id)
+      await chrome.storage.local.set({ [DASH_HIDDEN_KEY]: [...next] })
+    }).catch(() => setLayoutError('Could not save widget visibility. Try again.'))
+  }
+  function resizeWidget(id: string, w: number, h: number) {
+    const meta = metaOf(id)
+    if (!meta?.steps.some(step => step.w === w && step.h === h)) return
+    const next = boardRef.current.map(item => item.i === id ? { ...item, w, h } : item)
+    setItems(next)
+    void chrome.storage.local.set({ [KEYS.dashLayout]: toDoc(next) }).catch(() => setLayoutError('Could not save widget size. Try again.'))
+  }
   const [editing, setEditing] = useState(false)
   const { width, containerRef, mounted } = useContainerWidth({ measureBeforeMount: true })
   // What storage currently says — the persist guard's reference point (a
@@ -131,21 +158,25 @@ export const DashboardGrid = memo(function DashboardGrid({ animate }: { animate:
   // guarded: a board that matches what storage already says writes
   // nothing. The worker never touches this key; it's a pure UI preference.
   const onLayoutChange = useCallback((layout: Layout): void => {
-    const clean = migrate({ v: 2, items: layout.map((l) => ({ i: l.i, x: l.x, y: l.y, w: l.w, h: l.h })) })
+    const incoming = layout.map((l) => ({ i: l.i, x: l.x, y: l.y, w: l.w, h: l.h })) as RGLItem[]
+    const clean = migrate(toDoc(mergeVisibleGeometry(boardRef.current, incoming, hiddenRef.current)))
     setItems((prev) => (prev && sameBoard(prev, clean) ? prev : clean))
     if (!sameBoard(clean, storedRef.current)) {
-      chrome.storage.local.set({ [KEYS.dashLayout]: toDoc(clean) })
+      void chrome.storage.local.set({ [KEYS.dashLayout]: toDoc(clean) }).catch(() => setLayoutError('Could not save widget positions. Try again.'))
     }
   }, [])
 
   return (
     <>
+      {layoutError && <NotificationCard className="dash-layout-error" onDismiss={() => setLayoutError(null)} dismissLabel="Dismiss layout message">{layoutError}</NotificationCard>}
       {/* Edit layout (the 6.7.0 toggle, kept verbatim in spirit): flips
        * RGL's drag/resize on — heads drag, corner grips resize, steps snap.
        * While on, a Default layout button sits beside it: it DROPS the
        * stored key (not overwrites), so the registry's board returns and a
        * future default re-seats the board too. */}
       <div className="dash-edit-bar">
+        <WidgetChooser name="Dashboard widgets" disabled={!visibility.loaded || Boolean(visibility.error)}
+          items={PANEL_IDS.map(id => ({ id, title: metaOf(id)!.title, visible: !hidden.has(id) }))} onToggle={changeVisibility} />
         <button
           className={`btn btn--sm dash-edit-toggle${editing ? ' btn--primary' : ''}`}
           aria-pressed={editing}
@@ -159,7 +190,8 @@ export const DashboardGrid = memo(function DashboardGrid({ animate }: { animate:
             className="btn btn--sm dash-reset-toggle"
             title="Restore the default arrangement and sizes"
             onClick={() => {
-              chrome.storage.local.remove(KEYS.dashLayout)
+              visibilityWrites.current = visibilityWrites.current.then(() => chrome.storage.local.remove([KEYS.dashLayout, DASH_HIDDEN_KEY]))
+                .catch(() => setLayoutError('Could not reset the layout. Try again.'))
             }}
           >
             Default layout
@@ -172,17 +204,17 @@ export const DashboardGrid = memo(function DashboardGrid({ animate }: { animate:
        * the MEASURED element and carries no padding of its own — RGL's
        * column math divides the width it is handed, so a padded measurement
        * would push every tile off the board's right edge. */}
-      <div className="dash-board">
+      <div className={`dash-board${editing ? ' dash-board--editing' : ''}`}>
         <div className={`dash-grid${editing ? ' dash-grid--editing' : ''}`} ref={containerRef}>
         {/* `loaded`: chrome.storage answers async — the grid mounts only
          * once the stored doc (or its absence) has actually been read, so
          * the first RGL render is already the real board. */}
-        {loaded && mounted && (
-          <GridCtx.Provider value={{ editing }}>
+        {loaded && visibility.loaded && mounted && (
+          <GridCtx.Provider value={{ editing, hide: id => changeVisibility(id, false), resize: resizeWidget }}>
             <GridLayout
               className={`dash-rgl${animate ? '' : ' dash-rgl--still'}`}
               width={width}
-              layout={board}
+              layout={visibleBoard}
               gridConfig={GRID_CONFIG}
               dragConfig={{
                 enabled: editing,
@@ -204,7 +236,7 @@ export const DashboardGrid = memo(function DashboardGrid({ animate }: { animate:
                * content-as-children API (a function-component tile would
                * silently eat the grip: its own JSX children override the
                * cloned ones — found live, handles simply never rendered). */}
-              {board.map((item) => {
+              {visibleBoard.map((item) => {
                 const TileComponent = TILE_COMPONENTS[item.i as keyof typeof TILE_COMPONENTS]
                 if (!TileComponent) return null
                 return (
@@ -216,6 +248,7 @@ export const DashboardGrid = memo(function DashboardGrid({ animate }: { animate:
             </GridLayout>
           </GridCtx.Provider>
         )}
+        {loaded && visibility.loaded && visibleBoard.length === 0 && <div className="widgets-empty"><h2>Your board is clear</h2><p>Add widgets to build your dashboard.</p></div>}
         </div>
       </div>
     </>

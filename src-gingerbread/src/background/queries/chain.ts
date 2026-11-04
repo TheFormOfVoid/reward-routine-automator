@@ -24,12 +24,18 @@ export async function nextQuery(): Promise<QueryResult> {
     chosen = await generate()
   }
 
-  const key = chosen.query.toLowerCase()
-  await chrome.storage.local.set({
-    recentQueries: [key, ...recent.filter((q) => q !== key)].slice(0, RECENT_QUERY_MEMORY),
-  })
-
   return chosen
+}
+
+// Preparing a query is not submitting it. Record it only after the driver has
+// observed the matching results navigation, so abandoned prefetches and retries
+// do not consume the recent-submission history.
+export async function recordSubmittedQuery(query: string): Promise<void> {
+  const key = query.trim().toLowerCase().slice(0, 90)
+  if (!key) return
+  const stored = await chrome.storage.local.get('recentQueries')
+  const recent: string[] = Array.isArray(stored.recentQueries) ? stored.recentQueries.filter((q: unknown): q is string => typeof q === 'string') : []
+  await chrome.storage.local.set({ recentQueries: [key, ...recent.filter(q => q !== key)].slice(0, RECENT_QUERY_MEMORY) })
 }
 
 let nextQueryPrefetch: Promise<QueryResult> | null = null

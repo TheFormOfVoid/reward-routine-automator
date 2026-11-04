@@ -21,6 +21,7 @@ import type { Stats } from '../../shared/storage.ts'
 import { progressPair, statsAreCurrent } from '../pure/verdicts.ts'
 import { prowlDelayMs, prowlSearchCount, prowlWindowMs } from '../pure/prowl.ts'
 import { startSearchBatch } from './search.ts'
+import { inQuietHours } from '../pure/run-tools.ts'
 
 export const PROWL_ALARM = 'prowlTick'
 
@@ -63,6 +64,7 @@ export async function prowlFire(): Promise<void> {
   // The toggle-off path clears the alarm too; this is the belt to that
   // suspenders, for the race where the toggle landed after the alarm fired.
   if (!settings.randomSearchEnabled) return
+  if (inQuietHours(settings)) { await drawAndArm(); return }
 
   const state = await readRunState()
   const busy = state.batch != null || state.routine != null || state.activity != null

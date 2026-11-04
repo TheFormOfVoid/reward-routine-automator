@@ -1,3 +1,4 @@
+import './HistoryChart.css'
 import { useMemo } from 'react'
 import type { HistoryEntry } from '../../shared/storage.ts'
 

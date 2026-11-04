@@ -5,13 +5,14 @@ import type { Appearance, BackgroundStyle, Settings as SettingsShape, StepId, Ta
 import { DEFAULT_SETTINGS, ENABLED_KEY, STEP_LABEL } from '../../shared/settings.ts'
 import { slotMissingDefaults } from '../../background/pure/orders.ts'
 import { parseTimeOfDay, to12Hour, from12Hour, type Meridiem } from '../../background/pure/schedule.ts'
-import { QUERY_SOURCES, DEFAULT_QUERY_SOURCE_ORDER } from '../../background/queries/sources.ts'
+import { QUERY_SOURCE_LABELS as QUERY_SOURCES, DEFAULT_QUERY_SOURCE_ORDER } from '../../background/queries/metadata.ts'
 import { viewVariants } from '../fx/motion-presets.ts'
 import { Card } from '../components/Card.tsx'
 import { Switch } from '../components/Switch.tsx'
 import { Segmented } from '../components/Segmented.tsx'
 import { NumberField } from '../components/NumberField.tsx'
 import { Slider } from '../components/Slider.tsx'
+import { BackupCard } from '../components/BackupCard.tsx'
 
 // The popup's tabs, in the sectionOrder the layout editor arranges.
 const SECTION_LABELS: Record<string, string> = {
@@ -61,6 +62,7 @@ function Row({
 export function Settings({
   settings,
   save,
+  motionOn,
 }: {
   settings: SettingsShape
   save: (patch: Partial<SettingsShape>) => Promise<SettingsShape>
@@ -98,7 +100,7 @@ export function Settings({
   const sectionOrder = slotMissingDefaults(settings.sectionOrder, DEFAULT_SETTINGS.sectionOrder)
 
   return (
-    <motion.div className="view" variants={viewVariants} initial="initial" animate="enter" exit="exit">
+    <motion.div className="view" variants={viewVariants} initial={motionOn ? 'initial' : false} animate="enter" exit={motionOn ? 'exit' : undefined}>
       <Card title="Appearance">
         <Row label="Mode">
           <Segmented<Appearance>
@@ -188,7 +190,7 @@ export function Settings({
             onCommit={(n) => save({ backgroundBrightness: n })}
           />
         </Row>
-        <Row label="Glass blur" hint="How much the cards frost the backdrop">
+        <Row label="Glass blur" hint="How much cards and navigation frost the backdrop">
           <Slider
             value={settings.tileBlur}
             min={0}
@@ -197,6 +199,12 @@ export function Settings({
             ariaLabel="Glass blur"
             onCommit={(n) => save({ tileBlur: n })}
           />
+        </Row>
+        <Row label="Top bar background" hint="Block scrolling content behind the top bar">
+          <Switch checked={settings.topBarBackground} onChange={(v) => toggle('topBarBackground', v)} label="Top bar background" />
+        </Row>
+        <Row label="Bottom bar background" hint="Block scrolling content behind the bottom bar">
+          <Switch checked={settings.bottomBarBackground} onChange={(v) => toggle('bottomBarBackground', v)} label="Bottom bar background" />
         </Row>
         <Row label="Accent" hint="Theme default, or pick a color">
           <div className="swatches">
@@ -234,6 +242,12 @@ export function Settings({
         <Row label="Run on a schedule" hint="Also in a browser that never closes and reopens">
           <Switch checked={settings.scheduledRunEnabled} onChange={(v) => toggle('scheduledRunEnabled', v)} label="Run on a schedule" />
         </Row>
+        <Row label="Quiet hours" hint="Postpone automatic activity during this window">
+          <Switch checked={settings.quietHoursEnabled} onChange={(v) => toggle('quietHoursEnabled', v)} label="Quiet hours" />
+        </Row>
+        {settings.quietHoursEnabled && <Row label="Quiet window" hint="Your local time; may cross midnight">
+          <span className="field-inline"><input className="backup-time" type="time" aria-label="Quiet hours start" value={settings.quietHoursStart} onChange={(event) => event.target.value && save({ quietHoursStart: event.target.value })} /><span>to</span><input className="backup-time" type="time" aria-label="Quiet hours end" value={settings.quietHoursEnd} onChange={(event) => event.target.value && save({ quietHoursEnd: event.target.value })} /></span>
+        </Row>}
         <Row label="Scheduled time" hint="Your local time">
           <span className="field-inline">
             <NumberField
@@ -464,6 +478,16 @@ export function Settings({
           <Switch checked={settings.experimentalFeatures} onChange={(v) => toggle('experimentalFeatures', v)} label="Experimental features" />
         </Row>
       </Card>
+
+      <Card title="Restock watcher">
+        <Row label="Watch for restocks" hint="Check the catalog between routines">
+          <Switch checked={settings.restockWatcherEnabled} onChange={(v) => toggle('restockWatcherEnabled', v)} label="Watch for restocks" />
+        </Row>
+        {settings.restockWatcherEnabled && <Row label="Check every" hint="Minutes; quiet hours apply">
+          <NumberField value={settings.restockIntervalMin} min={15} max={1440} suffix="min" onCommit={(n) => save({ restockIntervalMin: n })} ariaLabel="Restock check interval" />
+        </Row>}
+      </Card>
+      <BackupCard />
     </motion.div>
   )
 }

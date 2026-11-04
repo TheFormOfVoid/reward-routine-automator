@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useLayoutEffect } from 'react'
 import type { Settings } from '../../shared/settings.ts'
 import { inkFor } from '../lib/format.ts'
 
@@ -16,7 +16,7 @@ export function useTheme(
 ): void {
   const { appearance, theme, accentColor, backgroundBrightness, tileBlur } = settings
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = document.documentElement
     const media = window.matchMedia('(prefers-color-scheme: dark)')
 

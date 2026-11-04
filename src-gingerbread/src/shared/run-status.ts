@@ -14,6 +14,7 @@ export interface LiveStatus {
 }
 
 export function liveStatus(runState: RunState): LiveStatus {
+  if (runState.pause) return { text: runState.pause.effectiveAt ? 'Paused — ready to resume' : 'Pausing after the current action', live: true }
   if (runState.batch) return { text: `Searching — ${runState.batch.remaining} left`, live: true }
   if (runState.routine) {
     const step = runState.activity?.label

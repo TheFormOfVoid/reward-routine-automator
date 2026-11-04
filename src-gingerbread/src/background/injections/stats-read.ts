@@ -8,7 +8,7 @@
 // type-checker; the typed signature below is still exported for callers.
 
 // waitMode: "cards" (the dashboard — the top cards matter), "streaks" (the
-// Earn page — the streak cards matter), or omitted (wait for everything).
+// Earn page — the streak cards matter), "search" (points breakdown only), or omitted.
 export function readRewardsStats(timeoutMs: number, waitMode?: string) {
   return new Promise(resolve => {
     const POLL_INTERVAL_MS = 500;
@@ -616,6 +616,7 @@ export function readRewardsStats(timeoutMs: number, waitMode?: string) {
     }
 
     function readAll() {
+      if (waitMode === "search") return { ...emptyStats(), searchPoints: searchPointsValue() };
       return {
         // The card first (old design); the header pill answers the redesign
         // (the Available points card is gone — headerPointsBalance).
@@ -665,6 +666,7 @@ export function readRewardsStats(timeoutMs: number, waitMode?: string) {
     let keOtherAnsweredAt = 0;
 
     function complete(stats) {
+      if (waitMode === "search") return stats.searchPoints != null;
       const cardsAnswered =
         stats.availablePoints != null && stats.dailyStreak != null;
       const streaksAnswered = Object.values(stats.activities).every(
@@ -705,8 +707,10 @@ export function readRewardsStats(timeoutMs: number, waitMode?: string) {
       // is load-bearing: the breakdown's flyout is modal (the shell goes
       // inert), so both disclosure clicks must land first — see
       // streaksResolvedBeforeFlyout.
-      expandStreaksIfCollapsed();
-      expandKeepEarningIfCollapsed();
+      if (waitMode !== "search") {
+        expandStreaksIfCollapsed();
+        expandKeepEarningIfCollapsed();
+      }
       expandPointsBreakdownIfCollapsed();
 
       // The press log watches every poll, so a flyout that opens and closes

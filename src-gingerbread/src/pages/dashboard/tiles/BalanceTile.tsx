@@ -4,14 +4,11 @@
 // hooks (one source of truth with the popup); the Refresh action lives in
 // the head, as it has since the header bar was dropped (2026-09-09).
 //
-// Designed steps → variants (2026-09-11 rework): the compact step (3×2)
-// keeps the hero in ONE row with the ring scaled down, so the stat tiles
-// below always fit — nothing hides, nothing scrolls (user: "when I make the
-// balance section smaller, some components get hidden. Fix it"). The wide
-// steps grow the value type; the tall steps add air (and room for the star
-// drawer). The variant comes from the step's own w/h, not its index — the
-// registry's steps are a lattice, so the index order says nothing about the
-// shape.
+// The measured body width chooses two or four stat columns; never three,
+// which used to leave Coupons below the default 4×2 seat. The compact step
+// scales the ring, while freshness/live status use their own full-width row.
+// Tall steps add air and space for the inline stamp drawer. The variant
+// comes from the step's own w/h, not its position in the registry lattice.
 
 import { useState } from 'react'
 import { useStats } from '../../../popup/hooks/useStats.ts'
@@ -43,6 +40,7 @@ export function BalanceTile({ seat, ...rest }: TileProps) {
 
   const available = parsePoints(stats?.availablePoints)
   const shown = useCountUp(available, animate)
+  const balanceText = shown == null ? '—' : formatNumber(shown)
   const pair = progressPair(stats?.searchPoints)
   const fresh = statsAreCurrent(stats)
   const delta = earnedToday(history, localDayKey())
@@ -103,26 +101,32 @@ export function BalanceTile({ seat, ...rest }: TileProps) {
               </span>
             )}
           </div>
-          <span className="dash-hero-value">{shown == null ? '—' : formatNumber(shown)}</span>
+          <span className={`dash-hero-value${balanceText.length > 9 ? ' dash-hero-value--long' : ''}`}>
+            {balanceText}
+          </span>
           {delta != null && (
             <span className={`delta${delta > 0 ? ' delta--up' : delta < 0 ? ' delta--down' : ''}`}>{signed(delta)} today</span>
           )}
-          <span className="dash-status">
-            {fresh ? 'Updated today' : 'Refresh to update'} · {runText}
-          </span>
         </div>
         <PointsRing done={pair ? pair[0] : null} total={pair ? pair[1] : null} label="search points" animate={animate} />
+      </div>
+      <div className="dash-status">
+        <span>{fresh ? 'Updated today' : 'Refresh to update'}</span>
+        <span>{runText}</span>
       </div>
       <div className="dash-tiles">
         <StatTile label="Ready to claim" value={displayPoints(stats?.readyToClaim, '—')} />
         <StatTile label="Daily streak" value={stats?.dailyStreak || '—'} />
         <button
           className={`dash-tile dash-tile--press${starOpen ? ' dash-tile--open' : ''}`}
+          type="button"
+          aria-expanded={starOpen}
+          aria-controls="balance-stamp-detail"
           onClick={() => setStarOpen((v) => !v)}
         >
           <span className="dash-tile-label">Stamp bonus</span>
           <span className="dash-tile-value">{stats?.stampBonus || '—'}</span>
-          <span className="dash-tile-sub">{stars ? (starOpen ? 'close' : 'tap for stars') : undefined}</span>
+          <span className="dash-tile-sub">{starOpen ? 'Hide details' : stars ? 'Show stars' : 'Show details'}</span>
         </button>
         <StatTile
           label="Coupons"
@@ -131,7 +135,7 @@ export function BalanceTile({ seat, ...rest }: TileProps) {
         />
       </div>
       {starOpen && (
-        <div className="star-detail">
+        <div className="star-detail" id="balance-stamp-detail">
           {stars ? (
             <>
               <div className="star-grid" aria-label={`${stars.lit} of ${stars.total} stamps lit`}>

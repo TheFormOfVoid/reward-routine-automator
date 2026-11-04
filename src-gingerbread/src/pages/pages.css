@@ -46,11 +46,9 @@ body {
   backdrop-filter: blur(var(--tile-blur, 10px));
 }
 .page-glyph {
+  display: block;
   width: 44px;
   height: 44px;
-  border-radius: 13px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 45%, transparent);
   margin-bottom: 16px;
 }
 .page-title {

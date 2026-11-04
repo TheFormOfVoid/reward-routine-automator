@@ -6,6 +6,8 @@ import { viewVariants } from '../fx/motion-presets.ts'
 import { Card } from '../components/Card.tsx'
 import { LogLine } from '../components/LogLine.tsx'
 import { useActivityLog } from '../hooks/useActivityLog.ts'
+import { RunHistoryPanel } from '../components/RoutineTools.tsx'
+import { downloadDiagnostics } from '../../shared/diagnostics.ts'
 
 export function Activity({ runState }: { runState: RunState }) {
   const { tabAction, rewards, statsLog, redeemLog, ordersLog, imageLog, lastQuery, hasLogs } = useActivityLog()
@@ -74,6 +76,10 @@ export function Activity({ runState }: { runState: RunState }) {
         ) : (
           <p className="muted small">No activity yet — run a step or the routine to see it here.</p>
         )}
+      </Card>
+      <Card title="Run history" action={<button className="activity-action" onClick={() => downloadDiagnostics().catch(() => setCopyStatus('Could not export diagnostics.'))}>Export diagnostics</button>}>
+        <p className="muted small">Diagnostics contain timing and outcomes, with queries, account balances and redemption codes omitted.</p>
+        <RunHistoryPanel />
       </Card>
     </motion.div>
   )

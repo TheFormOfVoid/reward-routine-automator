@@ -5,7 +5,7 @@
 // Each feature records the tabs it opens so it can close them again when it
 // finishes. Daily set is the reason this can't just remember one id: clicking
 // a tile opens further tabs, so anything created while a feature is
-// "capturing" counts as belonging to it. This bookkeeping lives inside the
+// "capturing" is attributed only when its opener already belongs to it. This bookkeeping lives inside the
 // run-state document (captures.capturing / captures.opened) rather than two
 // storage keys of its own — the serialization that made the v1 writes safe is
 // updateRunState's promise chain now, and a stop clears the bookkeeping as
@@ -18,6 +18,7 @@ import { holdKeepAlive, releaseKeepAlive } from './keepalive.ts'
 import { sleep } from './delays.ts'
 import { setLastTabAction, STEP_LABEL } from './log.ts'
 import { isDashboardUrl, pickFinishSweep } from '../pure/finish-sweep.ts'
+import { createNormalTab } from './normal-tabs.ts'
 
 // The capture bookkeeping's id: a startup StepId OR a synthetic one for
 // features outside the routine (src-donut used the plain string "coupons" the
@@ -36,11 +37,19 @@ export interface ClearResult {
 // Wired to chrome.tabs.onCreated in background/index.ts (the listener belongs
 // to the entry point; this is just the bookkeeping). No-ops unless some step
 // is capturing — a tab the user opened by hand is nobody's to close.
-export function recordOpenedTab(tabId: number): Promise<unknown> {
+export async function recordOpenedTab(created: chrome.tabs.Tab | number): Promise<unknown> {
+  // Direct tabs are claimed explicitly by the creator. The event listener is
+  // only for child tabs opened by those pages, never every tab the user opens
+  // during the same time window. Numeric input remains compatible with older
+  // listeners while the entry point moves to passing the full tab object.
+  const tab = typeof created === 'number' ? await chrome.tabs.get(created).catch(() => null) : created
+  if (tab?.id == null || tab.openerTabId == null) return
+  const tabId = tab.id
   return updateRunState((state) => {
     if (!state.captures.capturing.length) return
     for (const stepId of state.captures.capturing) {
       const ids = state.captures.opened[stepId] || []
+      if (!ids.includes(tab.openerTabId!)) continue
       if (!ids.includes(tabId)) state.captures.opened[stepId] = ids.concat(tabId)
     }
   })
@@ -115,17 +124,17 @@ export function waitForTabComplete(tabId: number, timeoutMs = 20000): Promise<bo
 
 // Reuse the previous batch's tab if it is still open, so repeated batches don't
 // pile up tabs.
-// `background` (the prowl's mini-batches) opens a NEW tab behind the user's
-// current one instead of stealing focus midday. The reuse path needs no flag:
-// tabs.update never activates the tab.
-export async function ensureBingTab(existingTabId: number | null, background = false): Promise<number> {
+// Every search tab is selected inside its normal window, including prowl. This
+// does not bring the window to the OS foreground. Retain the old optional flag
+// for callers, but tab selection is now the same for every search batch.
+export async function ensureBingTab(existingTabId: number | null, _background = false): Promise<number> {
   if (existingTabId != null) {
     try {
       const tab = await chrome.tabs.get(existingTabId)
       // Only reclaim it if it's still a Bing tab — the user may have navigated
       // it somewhere else since the last batch.
       if (tab && String(tab.url || '').startsWith('https://www.bing.com/')) {
-        await chrome.tabs.update(existingTabId, { url: 'https://www.bing.com/' })
+        await chrome.tabs.update(existingTabId, { url: 'https://www.bing.com/', active: true })
         return existingTabId
       }
     } catch {
@@ -133,7 +142,7 @@ export async function ensureBingTab(existingTabId: number | null, background = f
     }
   }
 
-  const tab = await chrome.tabs.create({ url: 'https://www.bing.com/', active: !background })
+  const tab = await createNormalTab('https://www.bing.com/')
   return tab.id as number
 }
 
@@ -143,11 +152,12 @@ export async function ensureBingTab(existingTabId: number | null, background = f
 // The window ids are handed in from closeTabs()'s own tabs.get pass —
 // re-fetching every tab here would double the round trips for no new
 // information.
-async function keepWindowsAlive(closingIds: number[], windowIds: Iterable<number>): Promise<void> {
+async function keepWindowsAlive(closingIds: number[], windowIds: Iterable<number>, expectedEpoch?: number): Promise<void> {
   const closing = new Set(closingIds)
 
   for (const windowId of windowIds) {
     const tabs = await chrome.tabs.query({ windowId })
+    if (!(await cleanupEpochMatches(expectedEpoch))) return
     if (tabs.length && tabs.every((tab) => closing.has(tab.id as number))) {
       // Only the user's own normal windows are worth keeping alive. A window
       // the extension itself created to host one read tab is allowed to close
@@ -159,12 +169,18 @@ async function keepWindowsAlive(closingIds: number[], windowIds: Iterable<number
       } catch {
         continue // the window is already going away
       }
+      if (!(await cleanupEpochMatches(expectedEpoch))) return
       await chrome.tabs.create({ windowId })
     }
   }
 }
 
-export async function closeTabs(ids: Array<number | null | undefined>, keepPinned: boolean): Promise<number> {
+async function cleanupEpochMatches(expectedEpoch?: number): Promise<boolean> {
+  return expectedEpoch == null || await currentStopEpoch() === expectedEpoch
+}
+
+export async function closeTabs(ids: Array<number | null | undefined>, keepPinned: boolean, expectedEpoch?: number): Promise<number> {
+  if (!(await cleanupEpochMatches(expectedEpoch))) return 0
   const unique = [...new Set(ids.filter((id): id is number => typeof id === 'number'))]
   const closable: number[] = []
   const windowIds = new Set<number>()
@@ -172,6 +188,7 @@ export async function closeTabs(ids: Array<number | null | undefined>, keepPinne
   for (const id of unique) {
     try {
       const tab = await chrome.tabs.get(id)
+      if (!(await cleanupEpochMatches(expectedEpoch))) return 0
       // One round trip feeds both filters: pinned here, the window sweep above.
       if (keepPinned && tab.pinned) continue
       closable.push(id)
@@ -183,7 +200,8 @@ export async function closeTabs(ids: Array<number | null | undefined>, keepPinne
 
   if (!closable.length) return 0
 
-  await keepWindowsAlive(closable, windowIds)
+  await keepWindowsAlive(closable, windowIds, expectedEpoch)
+  if (!(await cleanupEpochMatches(expectedEpoch))) return 0
   try {
     await chrome.tabs.remove(closable)
   } catch (e) {
@@ -233,7 +251,7 @@ export async function closeCapturedTabs(stepId: StepId, enabledKey: keyof Settin
       console.log(`Tab close for "${stepId}" skipped: stopped during the grace period.`)
       return 0
     }
-    const closed = await closeTabs(ids, settings.keepPinnedTabs)
+    const closed = await closeTabs(ids, settings.keepPinnedTabs, myEpoch)
     if (closed) {
       console.log(`Closed ${closed} tab(s) opened by "${stepId}".`)
       await setLastTabAction(`Closed ${closed} tab(s) after the ${STEP_LABEL[stepId] || stepId}`, true)
@@ -273,7 +291,8 @@ function isDashboardTab(tab: chrome.tabs.Tab): boolean {
 // window, since a prior run's dashboard may sit in another window; the just-
 // opened tab is spared by id. Best-effort: a routine never fails because a
 // stale tab could not be enumerated or closed.
-export async function closeOtherDashboardTabs(keepTabId: number | null): Promise<number> {
+export async function closeOtherDashboardTabs(keepTabId: number | null, expectedEpoch?: number): Promise<number> {
+  if (!(await cleanupEpochMatches(expectedEpoch))) return 0
   let tabs: chrome.tabs.Tab[]
   try {
     tabs = await chrome.tabs.query({})
@@ -286,7 +305,7 @@ export async function closeOtherDashboardTabs(keepTabId: number | null): Promise
     .filter(isDashboardTab)
     .map((tab) => tab.id)
     .filter((id): id is number => typeof id === 'number')
-  if (!doomed.length) return 0
+  if (!doomed.length || !(await cleanupEpochMatches(expectedEpoch))) return 0
   try {
     await chrome.tabs.remove(doomed)
   } catch (e) {
@@ -306,7 +325,8 @@ export async function closeOtherDashboardTabs(keepTabId: number | null): Promise
 //
 // Best-effort exactly like that sibling: a tab that cannot be enumerated or
 // closed never fails the routine.
-export async function closeBingRewardsTabs(keepIds: Array<number | null | undefined>): Promise<number> {
+export async function closeBingRewardsTabs(keepIds: Array<number | null | undefined>, expectedEpoch?: number): Promise<number> {
+  if (!(await cleanupEpochMatches(expectedEpoch))) return 0
   let tabs: chrome.tabs.Tab[]
   try {
     tabs = await chrome.tabs.query({})
@@ -327,7 +347,7 @@ export async function closeBingRewardsTabs(keepIds: Array<number | null | undefi
     keepPinned: settings.keepPinnedTabs,
     dashboardMatch: DASHBOARD_URL,
   })
-  if (!doomed.length) return 0
+  if (!doomed.length || !(await cleanupEpochMatches(expectedEpoch))) return 0
 
   // The hazard closeTabs() already guards against, and the reason it is worth
   // guarding here: removing every tab in a window closes the window with it, so
@@ -340,11 +360,12 @@ export async function closeBingRewardsTabs(keepIds: Array<number | null | undefi
     tabs.filter((tab) => tab.id != null && closing.has(tab.id)).map((tab) => tab.windowId),
   )
   try {
-    await keepWindowsAlive(doomed, windowIds)
+    await keepWindowsAlive(doomed, windowIds, expectedEpoch)
   } catch (e) {
     console.warn('Finish: the window guard failed:', e)
   }
 
+  if (!(await cleanupEpochMatches(expectedEpoch))) return 0
   try {
     await chrome.tabs.remove(doomed)
   } catch (e) {

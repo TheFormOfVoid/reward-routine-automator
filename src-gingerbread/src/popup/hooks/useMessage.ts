@@ -9,17 +9,24 @@ import type { Message, MessageResponse } from '../../shared/messages.ts'
 export function useMessage(): {
   send: (message: Message) => Promise<MessageResponse>
   busy: Message['type'] | null
+  error: string | null
+  clearError: () => void
 } {
   const [busy, setBusy] = useState<Message['type'] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const clearError = useCallback(() => setError(null), [])
 
   const send = useCallback(async (message: Message): Promise<MessageResponse> => {
     setBusy(message.type)
+    setError(null)
     try {
-      return await sendMessage(message)
+      const response = await sendMessage(message)
+      if (!response.ok) setError(response.error || 'This action could not start. Try again.')
+      return response
     } finally {
       setBusy(null)
     }
   }, [])
 
-  return { send, busy }
+  return { send, busy, error, clearError }
 }

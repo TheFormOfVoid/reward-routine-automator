@@ -114,6 +114,16 @@ body {
 .dash-panel-body::-webkit-scrollbar {
   display: none;
 }
+/* Notes and chart labels carry useful account information. Use the readable
+ * secondary text token in both appearances rather than the faint ramp. */
+.dash-panel .dash-muted,
+.dash-panel .chart-empty,
+.dash-panel .chart-label {
+  color: var(--text-dim);
+}
+.dash-panel .chart-label {
+  font-size: 11px;
+}
 .dash-panel-head {
   display: flex;
   align-items: center;
@@ -252,36 +262,40 @@ body {
  * shape — see tiles/*.tsx). History is the one holdout on the index class:
  * its steps are still a chain, so index 0 is reliably the strip. */
 
-/* Balance, compact (≤3 wide): the hero stays in ONE row — the ring scales
- * down and the stat tiles seat 2×2 — so the whole card fits the seat with
- * nothing hidden below the fold (user, 2026-09-11: "when I make the balance
- * section smaller, some components get hidden. Fix it"). */
+/* Balance keeps every summary visible in its 2-row seats. Its status gets
+ * the full body width, and metric columns switch as a pair (2 or 4), never
+ * leaving one card on a third row. Expanded stamp details can still scroll. */
+.dash-panel[data-panel-id='balance'] {
+  padding: 16px;
+}
+.dash-panel[data-panel-id='balance'] .dash-panel-body {
+  gap: 8px;
+}
+.dash-panel[data-panel-id='balance'] .dash-panel-body > * {
+  flex-shrink: 0;
+}
+.dash-panel.dash-balance--compact {
+  padding: 12px;
+}
 .dash-balance--compact .dash-hero {
-  gap: 12px;
+  gap: 10px;
 }
 .dash-balance--compact .dash-hero-left {
   gap: 2px;
 }
 .dash-balance--compact .dash-hero-tags {
-  flex-wrap: wrap;
+  gap: 4px;
 }
 .dash-balance--compact .dash-hero-value {
   font-size: 26px;
 }
 .dash-balance--compact .ring,
 .dash-balance--compact .ring svg {
-  width: 88px;
-  height: 88px;
+  width: 80px;
+  height: 80px;
 }
 .dash-balance--compact .ring-value {
-  font-size: 15px;
-}
-.dash-balance--compact .dash-tiles {
-  grid-template-columns: repeat(2, 1fr);
-  margin-top: 10px;
-}
-.dash-balance--compact .dash-tile {
-  padding: 8px 10px;
+  font-size: 16px;
 }
 /* Balance, wide (6 wide): the value grows into the room. */
 .dash-balance--wide .dash-hero-value {
@@ -290,10 +304,7 @@ body {
 /* Balance, tall (3 rows): the hero takes the spare height and the stat
  * tiles pin to the bottom — air, not stretch. */
 .dash-balance--tall .dash-hero {
-  flex: 1;
-}
-.dash-balance--tall .dash-tiles {
-  margin-top: 16px;
+  flex: 1 0 auto;
 }
 /* History, compact (the 1-tall seats 4×1/6×1): the chart is the tile, scaled
    down to the ~92px one-liner (user, 2026-09-11: "The graph should also be
@@ -318,71 +329,87 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
+  gap: 16px;
 }
 .dash-hero-left {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  min-width: 0;
 }
 .dash-hero-value {
   /* Compact (user request, 2026-09-09: "some components are too big") —
    * the hero states the balance, it doesn't have to shout it. */
-  font-size: 34px;
+  font-size: 32px;
   font-weight: 750;
   letter-spacing: -0.02em;
-  line-height: 1.02;
+  line-height: 1.1;
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.dash-hero-value.dash-hero-value--long {
+  font-size: clamp(18px, 7cqi, 30px);
 }
 .dash-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 12px;
   font-size: 12px;
+  line-height: 1.35;
   color: var(--text-dim);
+}
+.dash-status > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.dash-status > span:first-child {
+  color: var(--text);
 }
 .dash-tiles {
   display: grid;
-  /* Fluid: as many tiles per row as honestly fit the tile's width — four
-   * across at the default step, 2×2 in a narrower seat. */
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 88px), 1fr));
-  gap: 10px;
-  margin-top: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 .dash-tile {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   /* Centered (user request, 2026-09-09: the stats under the search ring
    * read as tiles, so their contents sit in the middle, not pinned left). */
   align-items: center;
   text-align: center;
-  padding: 10px 12px;
+  justify-content: center;
+  padding: 4px 8px;
   border-radius: var(--r-md);
   background: var(--surface-2);
   border: 1px solid var(--line-soft);
   min-width: 0;
 }
 .dash-tile-label {
-  font-size: 10px;
+  font-size: 12px;
+  line-height: 1.25;
   color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .dash-tile-value {
-  font-size: 15px;
+  font-size: 16px;
+  line-height: 1.125;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .dash-tile-sub {
-  font-size: 10px;
-  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--text-dim);
 }
 
 /* The label row carries the membership medal next to "Available points". */
 .dash-hero-tags {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   min-height: 18px;
 }
@@ -391,14 +418,14 @@ body {
  * it's a gold membership"). Fixed medal hues: the theme tokens carry no
  * tier palette, and a medal reads as its metal, not as the accent. */
 .dash-medal {
-  font-size: 10px;
+  max-width: 100%;
+  font-size: 11px;
+  line-height: 1.2;
   font-weight: 750;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 2px 9px;
+  padding: 1px 8px;
   border-radius: var(--r-full);
   border: 1px solid transparent;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .dash-medal--gold {
   color: #b8860b;
@@ -430,7 +457,6 @@ body {
  * affordances that say "this one opens". */
 .dash-tile--press {
   cursor: pointer;
-  text-align: left;
   font: inherit;
 }
 .dash-tile--press:hover,
@@ -444,7 +470,6 @@ body {
 
 /* The stamp-bonus star drawer under the tiles. */
 .star-detail {
-  margin-top: 10px;
   padding: 12px;
   border-radius: var(--r-md);
   background: var(--surface-2);
@@ -475,11 +500,13 @@ body {
 .ring {
   position: relative;
   flex: 0 0 auto;
-  width: 136px;
-  height: 136px;
+  width: 96px;
+  height: 96px;
 }
 .ring svg {
   display: block;
+  width: 100%;
+  height: 100%;
 }
 .ring-center {
   position: absolute;
@@ -491,15 +518,18 @@ body {
   gap: 2px;
 }
 .ring-value {
-  font-size: 22px;
+  font-size: 18px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 .ring-label {
-  font-size: 10px;
+  max-width: calc(100% - 16px);
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: center;
+  text-transform: none;
+  letter-spacing: normal;
   color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 .ring--done .ring-label {
   color: var(--accent);
@@ -654,73 +684,6 @@ body {
 .streak-progress-text {
   font-size: 10.5px;
   color: var(--text-faint);
-}
-
-/* ---------- the charts ---------- */
-/* The wrap positions the min/max labels as HTML so the SVG can stretch to
- * full width (preserveAspectRatio="none") without the text stretching with
- * it — an SVG label would render ~2x wide on a wide screen. */
-.history-chart-wrap {
-  position: relative;
-  display: block;
-  width: 100%;
-  flex: 1;
-  min-height: 96px;
-}
-.history-chart {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-.chart-grid {
-  stroke: var(--line-soft);
-  stroke-width: 1;
-  stroke-dasharray: 3 4;
-  vector-effect: non-scaling-stroke;
-}
-.chart-bar {
-  /* Muted so the whole histogram doesn't shout; the last day is the full
-   * accent (the day you're on). */
-  fill: color-mix(in srgb, var(--accent) 45%, transparent);
-}
-.chart-bar--last {
-  fill: var(--accent);
-}
-.chart-label {
-  position: absolute;
-  left: 4px;
-  font-size: 9px;
-  font-weight: 550;
-  color: var(--text-faint);
-  pointer-events: none;
-  /* A chip, so the label stays readable where the line passes under it. */
-  padding: 0 4px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--bg) 70%, transparent);
-}
-.chart-label--max {
-  top: 1px;
-}
-.chart-label--min {
-  bottom: 1px;
-}
-.chart-dot {
-  position: absolute;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-}
-.chart-empty,
-.dash-muted {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--text-faint);
-}
-.dash-goal {
-  margin-top: 14px;
 }
 
 /* ---------- Overwatch coin analytics ---------- */
@@ -919,8 +882,8 @@ body {
   background: var(--warn);
 }
 .coin-progress-note {
-  font-size: 10.5px;
-  color: var(--text-faint);
+  font-size: 11px;
+  color: var(--text-dim);
   /* The compact card wraps the note to its own lines instead of widening
    * the card past its capped track. */
   line-height: 1.45;
@@ -995,7 +958,7 @@ body {
 .news-when {
   font-size: 11px;
   font-weight: 550;
-  color: var(--text-faint);
+  color: var(--text-dim);
   white-space: nowrap;
 }
 
@@ -1118,8 +1081,8 @@ body {
   /* The page puts a little air (pt-2) between the meta row and the order
    * number — mirrored here. */
   margin-top: 5px;
-  font-size: 10.5px;
-  color: var(--text-faint);
+  font-size: 11px;
+  color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1225,7 +1188,7 @@ body {
 .order-outcome {
   margin: 10px 0 0;
   font-size: 12px;
-  color: var(--text-faint);
+  color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1251,7 +1214,7 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 10.5px;
   line-height: 1.5;
-  color: var(--text-faint);
+  color: var(--text-dim);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 140px;
@@ -1269,6 +1232,7 @@ body {
   right: 18px;
   z-index: 5;
 }
+.dash-rewards { position: fixed; top: 14px; left: 18px; z-index: 5; }
 /* The settings surface: the popup's own Settings component (same rows, same
  * storage), distributed across the full width — the cards flow into columns
  * so the screen is used evenly (user request: "well distributed on the
@@ -1376,6 +1340,19 @@ body {
 }
 
 /* ---------- the run-controls tile ---------- */
+.routine-tools-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+}
+.routine-tools-dialog::backdrop { background: rgb(0 0 0 / 55%); }
+.routine-tools-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.routine-tools-dialog-head h2 { margin: 0; font-size: 18px; }
 /* The ported popup controls stack in one column; the popup.css field /
  * btn-row / action-grid classes carry their own internals. The BASE is the
  * compact form — the stack ADJUSTS to the seat instead of scrolling (user,
@@ -1385,7 +1362,7 @@ body {
 .dash-controls {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
 }
 /* Denser than the popup's fields — a tile, not a page form. */
 .dash-controls .field {
@@ -1425,8 +1402,23 @@ body {
 /* ---------- the fine fluidity (container queries) ---------- */
 /* The step picks the LAYOUT; these pick the last mile inside it, on the
  * tile body's own measured width. */
+@container (min-width: 460px) {
+  .dash-tiles {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .dash-tile {
+    padding: 8px;
+  }
+  .dash-hero .ring {
+    width: 120px;
+    height: 120px;
+  }
+  .dash-hero .ring-value {
+    font-size: 22px;
+  }
+}
 @container (max-width: 300px) {
-  .dash-hero .dash-hero-value {
+  .dash-hero .dash-hero-value:not(.dash-hero-value--long) {
     font-size: 26px;
   }
 }
@@ -1492,14 +1484,6 @@ body {
   background: color-mix(in srgb, var(--warn) 16%, transparent);
   color: var(--warn);
   border: 1px solid color-mix(in srgb, var(--warn) 34%, transparent);
-}
-.finish-glyph {
-  width: 44px;
-  height: 44px;
-  border-radius: 13px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 45%, transparent);
-  margin-bottom: 16px;
 }
 .finish-title {
   margin: 0 0 6px;
@@ -1588,11 +1572,37 @@ body {
 }
 .finish-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 22px;
 }
+.finish-rewards { padding: 12px; font-size: 14px; }
+
+/* The board keeps its geometry while the control layer gains a glass surface. */
+.dash-edit-bar { flex-wrap: wrap; justify-content: flex-end; max-width: calc(100vw - 122px); padding: 6px; border: 1px solid var(--glass-edge); border-radius: 17px; background: var(--glass-surface); backdrop-filter: blur(var(--tile-blur, 10px)) saturate(150%); box-shadow: inset 0 1px 0 var(--glass-highlight); }
+.dash-edit-bar .btn { font-size: 11px; }
+.dash-panel { border-color: var(--glass-edge); box-shadow: inset 0 1px 0 var(--glass-highlight), 0 5px 20px rgb(0 0 0 / 9%); }
+.dash-panel-title { text-transform: none; letter-spacing: 0; font-size: 13px; }
+.dash-panel--editing .dash-panel-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-widget-size { max-width: 68px; }
+.dash-layout-error { position: fixed; top: 66px; left: 50%; transform: translateX(-50%); z-index: 10; margin: 0; }
+.dash-panel-body > .weekly-streaks { min-height: 0; }
+.dash-panel-body .weekly-streaks--compact { height: 100%; align-content: center; }
+@media (max-width: 600px) { .dash-board--editing { padding-top: 120px; } }
 .finish-done {
   flex: 1;
+  padding: 12px 16px;
+  font-size: 15px;
+}
+
+/* The Restart control beside Done (6.9.8) — shows only while an update is
+ * waiting on disk. Sized like Done but NOT flexing, so Done keeps the row and
+ * this reads as the secondary action. icon + label on one line. */
+.finish-restart {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
   padding: 12px 16px;
   font-size: 15px;
 }

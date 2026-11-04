@@ -15,15 +15,22 @@ import { useStats } from '../../../popup/hooks/useStats.ts'
 import { useDash } from '../ctx.tsx'
 import { Tile } from './Tile.tsx'
 import type { TileProps } from './Tile.tsx'
+import { estimateRoutine } from '../../../background/pure/run-tools.ts'
+import { useStorageValue } from '../../../popup/hooks/useStorageValue.ts'
+import { KEYS } from '../../../shared/storage.ts'
+import type { RunRecord } from '../../../shared/storage.ts'
 
 export function NextRoutineTile({ seat, ...rest }: TileProps) {
   const { settings } = useDash()
   const stats = useStats()
 
   const plan = enabledRoutinePlan(settings, stats)
+  const history = useStorageValue<RunRecord[]>('local', KEYS.runHistory, []).value
+  const estimate = estimateRoutine(history, plan.map(entry => entry.id))
 
   return (
     <Tile id="next" title="Next routine" seat={seat} {...rest}>
+      {estimate && <p className="dash-muted">Usually {Math.max(1, Math.floor(estimate.minMs / 60_000))}–{Math.max(1, Math.ceil(estimate.maxMs / 60_000))} min · based on {estimate.samples} comparable runs</p>}
       {!settings.startupEnabled && (
         <p className="dash-muted">Auto-start is off — this is what “Run the routine” would do now.</p>
       )}

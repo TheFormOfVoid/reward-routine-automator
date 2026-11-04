@@ -22,6 +22,7 @@ import { GridCtx, useDash } from '../ctx.tsx'
 import { stepIndexOf } from '../layout/snap.ts'
 import { metaOf } from './registry.ts'
 import { SECTION_LOCAL_KEYS } from './section-storage.ts'
+import { CloseIcon } from '../../../popup/components/icons.tsx'
 import type { TileStep } from './registry.ts'
 
 export interface TileProps extends ComponentPropsWithoutRef<'section'> {
@@ -40,7 +41,7 @@ export function Tile({
   ref,
   ...rest
 }: TileProps & { id: string; title: string; action?: ReactNode }) {
-  const { editing } = useContext(GridCtx)
+  const { editing, hide, resize } = useContext(GridCtx)
   const { settings } = useDash()
   // data-step is the seat's index in this tile's designed-step list — the
   // diag's "every tile sits on a designed step" gate reads it. The content
@@ -71,7 +72,7 @@ export function Tile({
           </span>
         )}
         <h2 className="dash-panel-title">{title}</h2>
-        {resetKeys && settings.developerOptionsEnabled && (
+        {!editing && resetKeys && settings.developerOptionsEnabled && (
           <button
             type="button"
             className="btn btn--sm dash-section-reset"
@@ -83,7 +84,13 @@ export function Tile({
             Reset
           </button>
         )}
-        {action}
+        {!editing && action}
+        {editing && meta && resize && <select className="dash-widget-size" aria-label={`Size of ${title}`} value={`${seat.w}x${seat.h}`}
+          onPointerDown={event => event.stopPropagation()} onChange={event => { const [w, h] = event.target.value.split('x').map(Number); resize(id, w, h) }}>
+          {meta.steps.map(size => <option key={`${size.w}x${size.h}`} value={`${size.w}x${size.h}`}>{size.w} × {size.h}</option>)}
+        </select>}
+        {editing && hide && <button className="icon-btn widget-remove" type="button" aria-label={`Remove ${title}`} title={`Remove ${title}`}
+          onPointerDown={event => event.stopPropagation()} onClick={() => hide(id)}><CloseIcon aria-hidden="true" /></button>}
       </div>
       <div className="dash-panel-body">{children}</div>
     </section>

@@ -26,7 +26,7 @@ folder, the name and the version line up:
 | 2 | Reward Routine Automator — Donut | 3.2.1 | `src-donut/` | plain JS, ESM |
 | 3 | Reward Routine Automator — Eclair | 4.1.1 | `src-eclair/` | plain JS, ESM |
 | 4 | Reward Routine Automator — Froyo | 5.1.1 | `src-froyo/` | plain JS, ESM |
-| 5 | Reward Routine Automator — Gingerbread | 6.9.7 | `src-gingerbread/` | React + TypeScript + Vite |
+| 5 | Reward Routine Automator — Gingerbread | 6.11.0 | `src-gingerbread/` | React + TypeScript + Vite |
 
 ## Features
 
@@ -49,11 +49,17 @@ it, and **(Gingerbread)** means Gingerbread alone.
   number you set. **Automatic** checks how many points the day still needs,
   runs only the searches still needed (3 points each, never past the cap),
   re-checks after the batch, and runs more while the points keep moving — up to
-  three batches. In Gingerbread the **first search of a batch loads Bing's
-  results URL directly** instead of typing into the search box — the closest an
-  extension can come to an address-bar search, since Chrome exposes no API for
-  the omnibox or for the browser's default search engine. Every search after
-  the first types as usual.
+  three batches. Gingerbread types every query into Bing's search box. Failed
+  or interrupted attempts are retried with deadlines and persisted state; they
+  do not reduce the remaining count. The results navigation confirms a
+  submission, while a fresh Rewards read determines actual credit.
+- **Gingerbread recovery** ? final fresh stats can retry incomplete, enabled
+  routine tasks in at most two recovery rounds. Further rounds require measured
+  progress; missing stats or credit stops recovery with an Activity note.
+- **Normal browser tabs** ? Gingerbread's stats and orders run in
+  existing normal windows. Search tabs are selected inside their window without
+  bringing that window to the OS foreground. The startup confirmation uses a
+  separate popup window.
 - **Image search** — one random image (picsum → thecatapi → a locally drawn
   canvas fallback) fed through Bing's visual-search dialog.
 - **Finish page** — a summary of what's left to do yourself (streaks in red)
@@ -193,6 +199,10 @@ history and the activity log.
   with a Copy button for pasting into a bug report.
 - **Developer options** — an API probe showing what the Rewards endpoints
   return, and a gate for experimental features.
+- **Restart when an update lands** — *(Gingerbread)*. Update the folder with the
+  bundled updater and a Restart button appears here and on the routine-finished
+  page, so applying the update is one click. It shows only while an update is
+  actually waiting, and clears itself once applied.
 
 ## How to install
 
@@ -217,9 +227,40 @@ npm --prefix src-gingerbread ci
 npm --prefix src-gingerbread run build
 ```
 
-then load `src-gingerbread/dist`.
+then load `src-gingerbread/dist`. Use Node.js **24.18.0**, pinned in `.node-version`.
+
+Run the reproducible checks from the Gingerbread directory:
+
+```sh
+npm run verify
+npx playwright install chromium
+npm run verify:browser
+```
+
+Browser fixtures use a fresh temporary profile and offline pages. They use installed Brave when available; set `BRAVE_EXECUTABLE` to choose it explicitly or `GINGERBREAD_BROWSER=chromium` to use Playwright Chromium. No existing browser profile is opened. Windows CI includes updater rollback tests; Linux CI runs the built extension in Chromium.
 
 ### Either way
 
 You must be signed in to bing.com in that browser profile — the extension
 automates the rewards you already have. It never signs in or creates accounts.
+
+### Updating — Gingerbread
+
+Gingerbread ships an updater inside its zip, beside `manifest.json`. Unzip a
+release once, then **double-click `updater\Update Gingerbread.cmd`** whenever you
+want the newest version. It finds the newest Gingerbread release, downloads it,
+and syncs it over the folder it is sitting in — no configuration, because the
+folder Chrome loads unpacked *is* the folder it was unzipped into.
+
+The files land immediately, but Chrome keeps running the version it already has
+in memory, and nothing outside the browser can press Reload for you. So the
+extension notices by itself: when the folder's `manifest.json` no longer matches
+the version Chrome loaded, a **Restart** button appears in the popup's
+notification area and on the routine-finished page. Press it, and the extension
+reloads onto the new files and the button disappears.
+
+The updater preserves its own folder while running. Replace the `updater` folder from the 6.10.0 ZIP once to get the new checksum and package validation. Future updates save the previous runtime in `updater/previous-install` and restore it if copying or cleanup fails.
+
+The other four builds update the old way: unzip the new release over the folder and
+click Reload at `chrome://extensions`. Design in
+[ADR-024](docs/architecture/adr-024-one-click-updater.md).

@@ -5,6 +5,7 @@ import type { BackgroundStyle } from '../../shared/settings.ts'
 import { sendMessage } from '../../shared/messages.ts'
 import { applyTheme } from '../../theme/apply.ts'
 import { Background } from '../../popup/fx/Background.tsx'
+import { BrandMark } from '../../popup/components/BrandMark.tsx'
 import '../../theme/tokens.css'
 import '../../theme/backgrounds.css'
 import '../pages.css'
@@ -24,7 +25,7 @@ function ConfirmPage({ background, animate }: { background: BackgroundStyle; ani
     <>
       <Background style={background} animate={animate} />
       <div className="page-card">
-        <div className="page-glyph" aria-hidden="true" />
+        <BrandMark size={44} className="page-glyph" />
         <h1 className="page-title">Start the daily routine?</h1>
         <p className="page-sub">
           Reward Routine Automator is about to run your searches and daily set. It starts on its own in a few

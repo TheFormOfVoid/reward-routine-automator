@@ -10,7 +10,8 @@
 
 // Runs in the top frame of https://www.bing.com/ — finds and presses the
 // camera icon that opens Bing's "search using an image" dialog.
-export function clickVisualSearchButton(): { ok: boolean; detail: string } {
+export function clickVisualSearchButton(expiresAt = 0): { ok: boolean; detail: string } {
+  if (expiresAt && Date.now() >= expiresAt) return { ok: false, detail: 'expired attempt' };
   // Bing's markup varies by page and A/B experiment, so try stable ids first.
   const SELECTORS = [
     "#sbsbi",                  // camera on the Bing homepage
@@ -109,7 +110,8 @@ export function clickVisualSearchButton(): { ok: boolean; detail: string } {
 // reports whether this frame holds something attachRandomImageToVisualSearch
 // below could use, so the worker can marshal the base64 image into the one
 // frame that answered yes instead of into all of them on every attempt.
-export function probeVisualSearchTarget(allowFallbacks: boolean): { candidate: boolean; hasFileInput: boolean } {
+export function probeVisualSearchTarget(allowFallbacks: boolean, expiresAt = 0): { candidate: boolean; hasFileInput: boolean } {
+  if (expiresAt && Date.now() >= expiresAt) return { candidate: false, hasFileInput: false };
   const byId = ["sb_fileinput", "sbfileinput", "sbi_file", "vs_fileinput"]
     .map(id => document.getElementById(id))
     .filter(el => el && el.type === "file");
@@ -132,8 +134,10 @@ export function probeVisualSearchTarget(allowFallbacks: boolean): { candidate: b
 export function attachRandomImageToVisualSearch(
   imageBase64: string,
   mimeType: string,
-  allowFallbacks: boolean
+  allowFallbacks: boolean,
+  expiresAt = 0
 ): { ok: boolean; detail: string } {
+  if (expiresAt && Date.now() >= expiresAt) return { ok: false, detail: 'expired attempt' };
   function frameNote() {
     return window.top === window
       ? "top frame"

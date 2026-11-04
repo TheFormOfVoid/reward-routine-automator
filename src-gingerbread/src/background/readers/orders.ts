@@ -10,13 +10,15 @@
 // committed). The reader
 // follows the redeem watch's shape: READ_RUN_GUARDS against a double-up, a
 // keep-alive hold (one page load plus every unsaved order's dialog round
-// trip), stop checkpoints between the dialogs, an own-window close tail
+// trip), stop checkpoints between the dialogs, an own-tab close tail
 // that ALWAYS cleans up, and the dump contract (ADR-010) through
 // lastOrdersLog when the page surprises the injections.
 
 import { beginActivity, endActivity, currentStopEpoch } from '../core/run-state.ts'
 import { sleep } from '../core/delays.ts'
-import { waitForTabComplete } from '../core/tabs.ts'
+import { closeTabs, waitForTabComplete } from '../core/tabs.ts'
+import { createNormalTab } from '../core/normal-tabs.ts'
+import { withDeadline } from '../pure/search-recovery.ts'
 import { holdKeepAlive, releaseKeepAlive } from '../core/keepalive.ts'
 import { setLastOrdersLog } from '../core/log.ts'
 import { KEYS, setLocal, getLocal } from '../../shared/storage.ts'
@@ -36,6 +38,12 @@ const ORDERS_HYDRATION_MS = 20000
 // dialog can take its time mounting AND its details load after it, so the
 // read gets a minute before it calls the row unanswered.
 const DETAIL_DIALOG_MS = 60000
+
+function executeOrdersScript<Args extends unknown[], Result>(
+  injection: chrome.scripting.ScriptInjection<Args, Result>,
+) {
+  return withDeadline(chrome.scripting.executeScript(injection), DETAIL_DIALOG_MS + 5000, 'Orders reader')
+}
 // The list itself holds every order (15 in the capture); the detail dialogs
 // are the slow part (one open-expand-read-close round trip each). Only NEW
 // orders get a dialog read (user spec, 2026-09-10: "if the item is already
@@ -44,33 +52,13 @@ const DETAIL_DIALOG_MS = 60000
 // one (its dialog never answered) stays a candidate, so a re-sync retries
 // what failed. Whatever the page shows is what we keep.
 const DETAIL_ROWS = Number.POSITIVE_INFINITY
-// The sync window's id, remembered in storage.local while the run is alive
-// (removed in the finally). If the WORKER dies mid-run — an extension
-// reload while a slow rescan is grinding, an eviction — the finally never
-// runs, the window is orphaned behind the user's work forever, and the
-// next press opens a SECOND one beside it (user report, 2026-09-10: "you
-// are opening two windows and nothing is being done"). The remembered id
-// is what heals that: the next sync — or the next worker wake — closes
-// whatever window a dead run left behind. Raw chrome.storage, not a KEYS
-// entry: transient bookkeeping, never app data.
+// Old builds stored a dedicated reader window's ID. Forget it without closing
+// a window: it may now contain the user's tabs or its numeric ID may be reused.
 const ORDERS_WINDOW_KEY = 'ordersSyncWinId'
 
-// Close the window a previous run left behind. Safe to call any time a
-// sync is NOT running (the guard says whether one is): a live run's window
-// is exactly the case we must not touch.
 export async function closeOrphanedOrdersWindow(): Promise<void> {
   if (READ_RUN_GUARDS.orders) return
-  const stored = await chrome.storage.local.get(ORDERS_WINDOW_KEY)
-  const winId = Number(stored && stored[ORDERS_WINDOW_KEY])
-  if (!winId) return
   await chrome.storage.local.remove(ORDERS_WINDOW_KEY)
-  try {
-    await chrome.windows.remove(winId)
-    console.log('Orders sync: closed a window left behind by an interrupted run.')
-  } catch {
-    // Already gone (the user closed it) — the stored id is stale, nothing
-    // to do.
-  }
 }
 
 // Where the tab ACTUALLY settled — on an origin the extension can inject
@@ -131,10 +119,8 @@ export async function syncOrders(opts: { forceAll?: boolean } = {}): Promise<voi
     console.log('Orders sync: already running; skipping.')
     return
   }
-  // First order of business: a window a previous (interrupted) run left
-  // behind. Done BEFORE the guard goes up — this close must not mistake a
-  // live run's window for an orphan, and no live run can exist here.
-  await closeOrphanedOrdersWindow()
+  // Claim the guard before any await: two quick Sync requests must not both
+  // pass an idle check and create parallel readers.
   READ_RUN_GUARDS.orders = true
 
   // The run outlives the idle window (a page load, a hydration poll and
@@ -145,29 +131,16 @@ export async function syncOrders(opts: { forceAll?: boolean } = {}): Promise<voi
   const myEpoch = await beginActivity('Order history')
   const stopped = (): Promise<boolean> => currentStopEpoch().then((v) => v !== myEpoch)
 
-  // The only window this run owns (closed in the finally — ALWAYS: the user's
-  // word is law, 2026-09-09: "don't let the window stay open even after the
-  // extension finishes it". The evidence contract survives in the dump text
-  // the panel shows, not in a parked tab.)
-  let ordersWinId: number | null = null
+  // Only this run's normal tab is eligible for cleanup, never its window.
+  let ordersTabId: number | null = null
 
   try {
-    // The page opens in its OWN, UNFOCUSED window (user request, 2026-09-10:
-    // "revert that and run the tab in a new window" — after the background
-    // TAB attempt measured 0 rows in the pipeline harness: the page never
-    // renders its list on a hidden tab). The active tab of an unfocused,
-    // non-minimized window renders as VISIBLE without stealing the user's
-    // focus or navigating them anywhere. Desktop-sized on purpose: the
-    // page's grid collapses to one column under its own md: breakpoint, and
-    // the read is proven against the wide layout.
-    const win = await chrome.windows.create({ url: ORDER_HISTORY_URL, focused: false, width: 1000, height: 820 })
-    if (!win || win.id == null) throw new Error('the order history window did not open')
-    ordersWinId = win.id
-    // Remembered so an interrupted run's window can be closed later (see
-    // ORDERS_WINDOW_KEY above) — the finally clears it on the way out.
-    await chrome.storage.local.set({ [ORDERS_WINDOW_KEY]: win.id })
-    const tab = win.tabs && win.tabs[0] ? win.tabs[0] : null
-    if (!tab || tab.id == null) throw new Error('the order history window opened without a tab')
+    // Retire the old key directly: the public orphan helper correctly refuses
+    // to touch bookkeeping while this guard is held.
+    await chrome.storage.local.remove(ORDERS_WINDOW_KEY)
+    const tab = await createNormalTab(ORDER_HISTORY_URL)
+    if (tab.id == null) throw new Error('the order history tab opened without an id')
+    ordersTabId = tab.id
 
     if (await stopped()) {
       console.log('Orders sync: stopped while opening the page.')
@@ -200,7 +173,7 @@ export async function syncOrders(opts: { forceAll?: boolean } = {}): Promise<voi
     // extension could not inject at all, which the caller reports with the
     // landed URL.
     const readRowsOnce = async (): Promise<OrderRowsRead | null> => {
-      const [listInjection] = await chrome.scripting.executeScript({
+      const [listInjection] = await executeOrdersScript({
         target: { tabId: tab.id! },
         func: readOrderRows,
         args: [ORDERS_HYDRATION_MS],
@@ -304,7 +277,7 @@ export async function syncOrders(opts: { forceAll?: boolean } = {}): Promise<voi
         continue
       }
       try {
-        const [detailInjection] = await chrome.scripting.executeScript({
+        const [detailInjection] = await executeOrdersScript({
           target: { tabId: tab.id! },
           func: readOrderDetail,
           args: [i, DETAIL_DIALOG_MS],
@@ -372,20 +345,11 @@ export async function syncOrders(opts: { forceAll?: boolean } = {}): Promise<voi
       e instanceof Error ? e.message : String(e),
     )
   } finally {
-    // Closes the window THIS run opened — unconditionally (user's spec,
-    // 2026-09-09: the window never stays behind, success or failure; a
-    // stop is no exception either, the dump text is the evidence now).
-    if (ordersWinId != null) {
-      try {
-        await chrome.windows.remove(ordersWinId)
-        console.log('Closed the window opened by the orders sync.')
-      } catch {
-        // Already gone (the user or the page closed it) — nothing to do.
-      }
+    // Close only the tab we opened. A user-added sibling tab is unrelated and
+    // must survive success, failure, cancellation, and legacy-window cleanup.
+    if (ordersTabId != null) {
+      await closeTabs([ordersTabId], false).catch((e) => console.warn('Orders sync: could not close its tab:', e))
     }
-
-    // The remembered window id dies with the run — a later orphan close
-    // must never target the NEXT run's window.
     await chrome.storage.local.remove(ORDERS_WINDOW_KEY)
     await endActivity('Order history')
     READ_RUN_GUARDS.orders = false

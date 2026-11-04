@@ -6,6 +6,12 @@
 export type Message =
   | { type: 'START_SEARCH_BATCH' }
   | { type: 'STOP_BATCH' }
+  | { type: 'PAUSE_ACTIVITY' }
+  | { type: 'RESUME_ACTIVITY' }
+  | { type: 'PREVIEW_REMAINING' }
+  | { type: 'RUN_REMAINING'; steps: string[] }
+  | { type: 'POSTPONE_ROUTINE'; minutes: number }
+  | { type: 'CANCEL_POSTPONE' }
   | { type: 'RUN_DAILY_SET' }
   | { type: 'RUN_KEEP_EARNING' }
   | { type: 'RUN_CLAIM' }
@@ -22,6 +28,7 @@ export type Message =
   | { type: 'CLEAR_ALL_TABS'; windowId?: number }
   | { type: 'RESET_ROUTINE_DAY' }
   | { type: 'PROBE_REWARDS_API' }
+  | { type: 'RELOAD_EXTENSION' }
   | { type: 'routineConfirmAnswer'; proceed: boolean }
 
 export type MessageType = Message['type']

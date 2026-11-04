@@ -10,11 +10,15 @@
 // board. A reload BEFORE Done re-reads the query and shows the overlay again
 // — the summary survives until the user has actually acknowledged it.
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { sendMessage } from '../../shared/messages.ts'
 import { STEP_LABEL } from '../../shared/settings.ts'
 import type { BackgroundStyle, StepId } from '../../shared/settings.ts'
 import { Background } from '../../popup/fx/Background.tsx'
 import { Confetti } from '../../popup/fx/Confetti.tsx'
+import { RestartIcon } from '../../popup/components/icons.tsx'
+import { RewardsLink } from '../../popup/components/RewardsLink.tsx'
+import { usePendingUpdate } from '../../popup/hooks/usePendingUpdate.ts'
 
 // The ?q= summary is keyed by Activities keys (the streaks the user finishes),
 // ?s= by StepId (the routine steps skipped as already done). Two maps, one per
@@ -24,6 +28,8 @@ const STREAK_LABEL: Record<string, string> = {
   dailySet: 'Daily set',
   bingApp: 'Bing app check-in',
   visualSearch: 'Image search',
+  claim: 'Claim points',
+  keepEarning: 'Keep earning',
 }
 
 export type FinishPair = { key: string; value: string }
@@ -78,9 +84,18 @@ export function FinishOverlay({
   onClose: () => void
 }) {
   const [closing, setClosing] = useState(false)
+  const pending = usePendingUpdate()
   const allDone = summary.todo.length === 0
+  const dialog = useRef<HTMLDivElement>(null)
+  const doneButton = useRef<HTMLButtonElement>(null)
+  const closingTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    doneButton.current?.focus()
+    return () => { if (closingTimer.current !== null) clearTimeout(closingTimer.current) }
+  }, [])
 
   const done = () => {
+    if (closingTimer.current !== null || closing) return
     // Still mode (animations off, low power, reduced motion) skips the
     // transition and the wait together.
     if (!animate) {
@@ -88,26 +103,36 @@ export function FinishOverlay({
       return
     }
     setClosing(true)
-    setTimeout(onClose, BLUR_OUT_MS)
+    closingTimer.current = setTimeout(onClose, BLUR_OUT_MS)
   }
 
   return (
     <div
+      ref={dialog}
       className={`finish-overlay${closing ? ' finish-overlay--closing' : ''}${animate ? '' : ' finish-overlay--still'}`}
       role="dialog"
-      aria-label="Daily routine complete"
+      aria-modal="true"
+      aria-labelledby="finish-heading"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') { event.preventDefault(); done(); return }
+        if (event.key !== 'Tab') return
+        const controls = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href]') || [])
+        const first = controls[0]
+        const last = controls.at(-1)
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+      }}
     >
       <Background style={background} animate={animate} />
       <div className="finish-card">
         <Confetti fire={animate} />
         {summary.dev && <div className="finish-dev">Preview · dev</div>}
-        <div className="finish-glyph" aria-hidden="true" />
-        <h1 className="finish-title">Daily routine complete</h1>
+        <h1 id="finish-heading" className="finish-title">Daily routine complete</h1>
         <p className="finish-sub">
           Reward Routine Automator finished its run.{' '}
           {allDone
             ? 'Every streak it can reach is done.'
-            : 'A couple of streaks need you to finish them by hand.'}
+            : 'Some tasks need attention or could not be verified.'}
         </p>
 
         {allDone && (
@@ -119,7 +144,7 @@ export function FinishOverlay({
 
         {summary.todo.length > 0 && (
           <section className="finish-section">
-            <h2 className="finish-section-title">Finish these yourself</h2>
+            <h2 className="finish-section-title">Needs attention</h2>
             <ul className="finish-list">
               {summary.todo.map(({ key, value }) => (
                 <li className="finish-row" key={key}>
@@ -148,7 +173,25 @@ export function FinishOverlay({
         )}
 
         <div className="finish-actions">
-          <button className="btn btn--primary finish-done" onClick={done}>
+          <RewardsLink label className="finish-rewards" />
+          {/* The Restart control (6.9.8), the only thing on this screen that is
+           * about the extension rather than the run. It appears only while an
+           * update is sitting on disk unloaded — see usePendingUpdate — and
+           * sits to the LEFT of Done so the screen's own verb stays last and
+           * keeps the primary weight. Both buttons use the popup's .btn set,
+           * which dashboard.html already loads. */}
+          {pending && (
+            <button
+              type="button"
+              className="btn finish-restart"
+              title="Reload the extension so Chrome runs the updated files."
+              onClick={() => sendMessage({ type: 'RELOAD_EXTENSION' })}
+            >
+              <RestartIcon />
+              Restart
+            </button>
+          )}
+          <button ref={doneButton} className="btn btn--primary finish-done" onClick={done}>
             Done
           </button>
         </div>

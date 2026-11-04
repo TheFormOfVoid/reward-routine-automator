@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ComponentType, SVGProps } from 'react'
 import { AnimatePresence } from 'framer-motion'
 import { getSettings, DEFAULT_SETTINGS } from '../shared/settings.ts'
@@ -14,17 +14,18 @@ import { useMouseEscape } from './hooks/useMouseEscape.ts'
 import { useMotionEnabled } from './fx/motion-presets.ts'
 import { Background } from './fx/Background.tsx'
 import { Banners } from './components/Banners.tsx'
+import { NotificationCard } from './components/NotificationCard.tsx'
+import { RewardsLink } from './components/RewardsLink.tsx'
 import { Today } from './views/Today.tsx'
 import { Run } from './views/Run.tsx'
-import { Activity } from './views/Activity.tsx'
-import { Redeem } from './views/Redeem.tsx'
-import { Settings } from './views/Settings.tsx'
+import { BrandMark } from './components/BrandMark.tsx'
+import { StorageGate } from './components/StorageGate.tsx'
+import { ViewBoundary } from './components/ViewBoundary.tsx'
 import {
   ActivityIcon,
   BackIcon,
   BellIcon,
   CheckCircleIcon,
-  CometMark,
   FlaskIcon,
   GearIcon,
   GiftIcon,
@@ -33,9 +34,13 @@ import {
   PlayIcon,
   RedoIcon,
   RefreshIcon,
+  WidgetEditIcon,
 } from './components/icons.tsx'
 
 type Tab = 'today' | 'runNow' | 'redeem' | 'activity'
+const Settings = lazy(() => import('./views/Settings.tsx').then((module) => ({ default: module.Settings })))
+const Redeem = lazy(() => import('./views/Redeem.tsx').then((module) => ({ default: module.Redeem })))
+const Activity = lazy(() => import('./views/Activity.tsx').then((module) => ({ default: module.Activity })))
 
 const TABS: { id: Tab; label: string; Icon: ComponentType<SVGProps<SVGSVGElement>> }[] = [
   { id: 'today', label: 'Today', Icon: HomeIcon },
@@ -47,6 +52,7 @@ const TABS: { id: Tab; label: string; Icon: ComponentType<SVGProps<SVGSVGElement
 // The status pill's read of "what's running now", from the same run-state doc
 // the Activity view uses.
 function statusOf(rs: RunState): { label: string; live: boolean } {
+  if (rs.pause) return { label: rs.pause.effectiveAt ? 'Paused' : 'Pausing…', live: true }
   if (rs.batch) return { label: `Searching · ${rs.batch.remaining}`, live: true }
   if (rs.routine) return { label: 'Routine', live: true }
   if (rs.activity) return { label: rs.activity.label, live: true }
@@ -54,11 +60,11 @@ function statusOf(rs: RunState): { label: string; live: boolean } {
 }
 
 export function App() {
-  const { settings, save, loaded } = useSettings()
+  const { settings, save, loaded, error, retry } = useSettings()
   const runState = useRunState()
   const stats = useStats()
   const history = usePointsHistory()
-  const { send, busy } = useMessage()
+  const { send, busy, error: commandError, clearError } = useMessage()
 
   useTheme(settings)
   // Low power mode overrides the animations toggle: everything that moves —
@@ -70,6 +76,18 @@ export function App() {
 
   const [tab, setTab] = useState<Tab>('today')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [widgetEditing, setWidgetEditing] = useState(false)
+  const headerRef = useRef<HTMLElement>(null)
+  useLayoutEffect(() => {
+    const header = headerRef.current
+    if (!header || !loaded) return
+    const app = header.closest<HTMLElement>('.app')
+    const measure = () => app?.style.setProperty('--popup-top-clearance', `${Math.ceil(header.getBoundingClientRect().height) + 24}px`)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(header)
+    return () => observer.disconnect()
+  }, [loaded])
   // The Developer Option "preview every banner": local state only — the sample
   // payloads live in the component (src-donut's testNotificationsBtn was DOM-only
   // the same way), so the preview vanishes on the next popup open.
@@ -84,7 +102,7 @@ export function App() {
     firedRef.current = true
     getSettings().then((s) => {
       if (s.refreshStatsOnPopupOpen) sendMessage({ type: 'REFRESH_STATS' })
-    })
+    }).catch(() => {})
   }, [])
 
   const status = statusOf(runState)
@@ -100,20 +118,24 @@ export function App() {
   const visibleTabs = slotMissingDefaults(settings.sectionOrder, DEFAULT_SETTINGS.sectionOrder).filter(
     (id) => !settings.hiddenSections.includes(id),
   ) as Tab[]
-  const activeTab = visibleTabs.includes(tab) ? tab : visibleTabs[0] || 'today'
+  // The toolbar can open the board editor even when Today is hidden from the
+  // navigation. Closing the editor restores the saved tab visibility.
+  const activeTab = widgetEditing && !settingsOpen ? 'today' : visibleTabs.includes(tab) ? tab : visibleTabs[0] || 'today'
 
   // Withhold the UI until the stored settings arrive: rendering from the
   // defaults first meant a visible flash when they differ (the glass tint's
   // alpha now tracks the blur knob, so a default-blur frame looked
   // near-transparent before the user's blur loaded — plus theme/appearance/
   // frame-height jumps). storage.sync answers in tens of ms warm.
-  if (!loaded) return null
+  if (!loaded) return <StorageGate error={error} retry={retry} />
 
   return (
-    <div className="app" style={{ height }}>
+    <div className="app" style={{ height }} data-low-power={settings.lowPowerMode || undefined}
+      data-top-bar-background={settings.topBarBackground} data-bottom-bar-background={settings.bottomBarBackground}
+      data-widget-editing={widgetEditing}>
       <Background style={settings.background} animate={motionOn} />
 
-      <header className="topbar">
+      <header className="topbar" ref={headerRef}>
         <div className="brand">
           {/* data-no-escape on Back: the way OUT of Settings must stay
            * clickable while the troll is on, same as the gear that leads in. */}
@@ -128,20 +150,18 @@ export function App() {
               <BackIcon />
             </button>
           ) : (
-            // The extension's own comet mark beside the title — matches the
-            // toolbar icon (see icons.tsx), not a blank gradient square.
-            <CometMark className="brand-glyph" />
+            <BrandMark className="brand-glyph" />
           )}
           {/* The bar shows just the codename (user request, 2026-09-26: "the
            * name that shows in the extension popup should be the code name") —
            * the full "Reward Routine Automator — Gingerbread" still names the
            * build everywhere it identifies itself (manifest, tab title, zip). */}
-          <span className="brand-title">{settingsOpen ? 'Settings' : 'Gingerbread'}</span>
+          <div className="brand-copy"><span className="brand-title">{settingsOpen ? 'Settings' : 'Gingerbread'}</span>
+            <span className={`status-pill${status.live ? ' status-pill--live' : ''}`} title={status.label}>{status.label}</span>
+          </div>
         </div>
         <div className="topbar-actions">
-          <span className={`status-pill${status.live ? ' status-pill--live' : ''}`} title={status.label}>
-            {status.label}
-          </span>
+          <RewardsLink />
           {/* The full-screen dashboard (user request, 2026-09-08): always
            * visible, not dev-gated — it is the extension's analytics surface,
            * the same data the popup shows, at full size. The worker opens it
@@ -162,6 +182,37 @@ export function App() {
           >
             <RefreshIcon />
           </button>
+          {!settingsOpen && (
+            <button
+              type="button"
+              className={`icon-btn${widgetEditing ? ' icon-btn--on' : ''}`}
+              onClick={() => {
+                setTab('today')
+                setWidgetEditing(activeTab !== 'today' || !widgetEditing)
+              }}
+              aria-label="Customize widgets"
+              aria-pressed={widgetEditing}
+              title="Customize widgets"
+            >
+              <WidgetEditIcon aria-hidden="true" />
+            </button>
+          )}
+          {!settingsOpen && (
+            /* data-no-escape: the gear never dodges — it's the way into
+             * Settings, where the troll feature lives (user request). */
+            <button
+              className="icon-btn"
+              onClick={() => {
+                setWidgetEditing(false)
+                setSettingsOpen(true)
+              }}
+              aria-label="Settings"
+              title="Settings"
+              data-no-escape
+            >
+              <GearIcon />
+            </button>
+          )}
           {/* Developer Options (gated on the Settings toggle, like the other
            * builds): the finish-screen opener — the dashboard overlay the
            * routine itself opens at endRoutine — the once-per-day reset, so
@@ -172,7 +223,7 @@ export function App() {
            * with sample payloads. The launches themselves walk their own
            * gates. */}
           {!settingsOpen && settings.developerOptionsEnabled && (
-            <>
+            <div className="developer-toolbar" role="group" aria-label="Developer tools">
               <button
                 className="icon-btn"
                 onClick={() => send({ type: 'OPEN_ROUTINE_DONE' })}
@@ -205,34 +256,23 @@ export function App() {
               >
                 <BellIcon />
               </button>
-            </>
+            </div>
           )}
-          {!settingsOpen && (
-            /* data-no-escape: the gear never dodges — it's the way into
-             * Settings, where the troll feature lives (user request). */
-            <button
-              className="icon-btn"
-              onClick={() => setSettingsOpen(true)}
-              aria-label="Settings"
-              title="Settings"
-              data-no-escape
-            >
-              <GearIcon />
-            </button>
-          )}
+
         </div>
       </header>
 
-      <main className="stage">
-        {/* The banners sit above the stage inside the fixed frame (compact
-         * single-line styling keeps the tabbar visible): the Bing-app warning,
-         * a restock, a newly sold-out amount. src-donut parity — not dismissible. */}
+      <main className="stage" tabIndex={0} aria-label="Extension content">
+        {commandError && <NotificationCard className="action-feedback" urgent onDismiss={clearError} dismissLabel="Dismiss action message">{commandError}</NotificationCard>}
+        {/* Compact notices stay independent of the view's width and state. */}
         {!settingsOpen && <Banners stats={stats} preview={bannerPreview} />}
+        <ViewBoundary><Suspense fallback={<div className="view-loading" role="status">Opening view…</div>}>
         <AnimatePresence mode="wait">
           {settingsOpen ? (
             <Settings key="settings" settings={settings} save={save} motionOn={motionOn} />
           ) : activeTab === 'today' ? (
-            <Today key="today" settings={settings} stats={stats} history={history} motionOn={motionOn} />
+            <Today key="today" settings={settings} stats={stats} history={history} motionOn={motionOn}
+              editing={widgetEditing} onEditingChange={setWidgetEditing} />
           ) : activeTab === 'runNow' ? (
             <Run key="run" settings={settings} save={save} runState={runState} send={send} busy={busy} motionOn={motionOn} />
           ) : activeTab === 'redeem' ? (
@@ -241,6 +281,7 @@ export function App() {
             <Activity key="activity" runState={runState} />
           )}
         </AnimatePresence>
+        </Suspense></ViewBoundary>
       </main>
 
       {!settingsOpen && (
@@ -249,7 +290,10 @@ export function App() {
             <button
               key={id}
               className={`tab${activeTab === id ? ' active' : ''}`}
-              onClick={() => setTab(id)}
+              onClick={() => {
+                setWidgetEditing(false)
+                setTab(id)
+              }}
               aria-current={activeTab === id}
             >
               <span className="tab-icon">

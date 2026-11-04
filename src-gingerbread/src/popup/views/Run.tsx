@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion'
+import { RoutineTools } from '../components/RoutineTools.tsx'
 import type { Settings } from '../../shared/settings.ts'
 import type { RunState } from '../../shared/storage.ts'
 import type { Message, MessageResponse } from '../../shared/messages.ts'
@@ -37,6 +38,9 @@ export function Run({
         <p className="muted small center">Runs your enabled startup steps, in order, right now.</p>
       </Card>
 
+      <Card title="Routine controls">
+        <RoutineTools runState={runState} send={send} />
+      </Card>
       <Card title="Web search">
         {running && (
           <div className="banner banner--run">

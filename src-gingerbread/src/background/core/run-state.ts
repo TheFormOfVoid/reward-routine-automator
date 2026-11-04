@@ -17,6 +17,7 @@
 
 import type { Captures, RightSizeRun, RoutineState, RunState, SkippedStep } from '../../shared/storage.ts'
 import { KEYS } from '../../shared/storage.ts'
+import { localDayKey } from './day.ts'
 
 // The parsing boundary reads an untrusted, possibly half-written blob, so it
 // works in `any` and hands back a fully-typed RunState — every field below is
@@ -64,6 +65,12 @@ export async function readRunState(): Promise<RunState> {
         remaining: Number(stored.batch.remaining) || 0,
         tabId: typeof stored.batch.tabId === 'number' ? stored.batch.tabId : null,
         nextRunAt: Number.isFinite(stored.batch.nextRunAt) ? stored.batch.nextRunAt : null,
+        retryCount: Math.max(0, Math.min(3, Math.floor(Number(stored.batch.retryCount) || 0))),
+        attemptId: Math.max(0, Math.floor(Number(stored.batch.attemptId) || 0)),
+        attemptStartedAt: Number.isFinite(stored.batch.attemptStartedAt) ? stored.batch.attemptStartedAt : 0,
+        ...(isPlainObject(stored.batch.pendingQuery) && typeof stored.batch.pendingQuery.query === 'string'
+          ? { pendingQuery: { query: stored.batch.pendingQuery.query.slice(0, 90), api: String(stored.batch.pendingQuery.api || 'retry') } }
+          : {}),
         ...(stored.batch.prowl === true ? { prowl: true } : {}),
       }
     : null
@@ -87,12 +94,23 @@ export async function readRunState(): Promise<RunState> {
           ? stored.routine.pendingTabs.filter((id: unknown): id is number => typeof id === 'number')
           : [],
         skipped: Array.isArray(stored.routine.skipped) ? ([...stored.routine.skipped] as SkippedStep[]) : [],
+        ...(Array.isArray(stored.routine.enabledSteps) ? { enabledSteps: stored.routine.enabledSteps.filter((id: unknown): id is string => typeof id === 'string') } : {}),
+        ...(Number.isFinite(stored.routine.recoveryRound) ? { recoveryRound: Math.max(0, Math.min(2, Math.floor(stored.routine.recoveryRound))) } : {}),
+        ...(isPlainObject(stored.routine.recoveryProgress) ? { recoveryProgress: Object.fromEntries(Object.entries(stored.routine.recoveryProgress).filter(([, value]) => Number.isFinite(value))) as Record<string, number> } : {}),
+        ...(stored.routine.recovering === true ? { recovering: true } : {}),
+        ...(Number.isFinite(stored.routine.ownerUntilAt) ? { ownerUntilAt: Math.max(0, stored.routine.ownerUntilAt) } : {}),
+        ...(Number.isFinite(stored.routine.startedAt) ? { startedAt: Math.max(0, stored.routine.startedAt) } : {}),
+        ...(typeof stored.routine.historyId === 'string' ? { historyId: stored.routine.historyId.slice(0, 100) } : {}),
+        ...(Number.isFinite(stored.routine.recoveryActions) ? { recoveryActions: Math.max(0, Math.floor(stored.routine.recoveryActions)) } : {}),
       }
     : null
 
   return {
     v: 1,
+    batchSequence: Math.max(0, ...[stored.batchSequence, batch?.runId].filter((id): id is number => Number.isSafeInteger(id))),
     stopEpoch: Number(stored.stopEpoch) || 0,
+    ...(isPlainObject(stored.pause) && Number.isFinite(stored.pause.requestedAt)
+      ? { pause: { requestedAt: stored.pause.requestedAt, ...(Number.isFinite(stored.pause.effectiveAt) ? { effectiveAt: stored.pause.effectiveAt } : {}) } } : {}),
     activity: isPlainObject(stored.activity) ? { label: String(stored.activity.label ?? '') } : null,
     batch,
     rightSizeRun,
@@ -143,8 +161,49 @@ export function stopAllActivity(): Promise<RunState> {
     state.batch = null
     state.rightSizeRun = null
     state.routine = null
+    delete state.pause
     state.captures = { capturing: [], opened: {} }
   })
+}
+
+// Pause is a durable request, acknowledged only between effects. It never
+// invalidates an in-flight receipt or loses the remaining queue.
+export async function requestPause(): Promise<void> {
+  await updateRunState(state => {
+    if (!state.batch && !state.routine) throw new Error('Pause is available for a search batch or routine')
+    state.pause ||= { requestedAt: Date.now() }
+  })
+}
+
+export async function pauseBoundary(): Promise<boolean> {
+  const current = await readRunState()
+  if (!current.pause) return false
+  if (current.pause.effectiveAt) return true
+  let paused = false
+  await updateRunState(state => {
+    if (!state.pause) return
+    state.pause.effectiveAt ||= Date.now()
+    paused = true
+  })
+  return paused
+}
+
+export async function clearPause(): Promise<void> {
+  await updateRunState(state => { delete state.pause })
+}
+
+export async function reserveRecoveryActions(count = 1): Promise<boolean> {
+  if (!(await readRunState()).routine) return true
+  let allowed = true
+  await updateRunState(state => {
+    if (!state.routine) return
+    const routine = state.routine
+    const amount = Math.max(1, Math.floor(count))
+    allowed = (routine.recoveryActions || 0) + amount <= 12 &&
+      (!routine.startedAt || Date.now() - routine.startedAt < 45 * 60_000)
+    if (allowed) routine.recoveryActions = (routine.recoveryActions || 0) + amount
+  })
+  return allowed
 }
 
 // A batch that was stopped or superseded must not keep running.
@@ -162,6 +221,7 @@ export async function isStaleBatch(runId: number): Promise<boolean> {
 export async function beginActivity(label: string): Promise<number> {
   let epoch = 0
   await updateRunState((state) => {
+    if (state.activity && state.activity.label !== label) throw new Error(`Busy: ${state.activity.label}`)
     if (!state.batch) state.activity = { label }
     epoch = state.stopEpoch
   })
@@ -183,13 +243,20 @@ export async function endActivity(label: string): Promise<void> {
 // let a stopped routine sweep its stashed tabs. Returns the consumed routine,
 // or null when none is live (the no-op every caller wants after a stop:
 // stopAllActivity already nulled it).
-export async function consumeRoutine(): Promise<RoutineState | null> {
-  let consumed: RoutineState | null = null
-  await updateRunState((state) => {
-    if (state.routine) {
-      consumed = state.routine
-      state.routine = null
-    }
+export function consumeRoutine(expectedEpoch?: number): Promise<RoutineState | null> {
+  const run = writeChain.then(async () => {
+    const state = await readRunState()
+    if (!state.routine || state.pause || (expectedEpoch != null && state.stopEpoch !== expectedEpoch)) return null
+    const consumed = state.routine
+    state.routine = null
+    if (expectedEpoch != null) state.activity = { label: 'Finishing routine' }
+    // Clearing ownership and marking the completed day form one commit.
+    // A Stop queued before this operation prevents both; one queued after it
+    // cancels presentation/cleanup but does not erase a completed routine.
+    await chrome.storage.local.set({ [KEYS.runState]: state,
+      ...(expectedEpoch != null ? { [KEYS.lastRoutineDay]: consumed.startDay || localDayKey() } : {}) })
+    return consumed
   })
-  return consumed
+  writeChain = run.catch(() => {})
+  return run
 }

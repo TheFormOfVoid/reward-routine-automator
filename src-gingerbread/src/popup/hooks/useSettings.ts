@@ -2,6 +2,7 @@ import { useCallback, useMemo } from 'react'
 import { DEFAULT_SETTINGS, saveSettings } from '../../shared/settings.ts'
 import type { Settings } from '../../shared/settings.ts'
 import { useStorageValue } from './useStorageValue.ts'
+import { normalizeSettings } from '../../shared/settings-validation.ts'
 
 // A stable empty fallback: useStorageValue hands the fallback straight back
 // while the key is absent, so a fresh {} each render would defeat the memo
@@ -20,12 +21,17 @@ export function useSettings(): {
   settings: Settings
   save: (patch: Partial<Settings>) => Promise<Settings>
   loaded: boolean
+  error: string | null
+  retry: () => void
 } {
-  const { value: stored, loaded } = useStorageValue<Partial<Settings>>('sync', 'settings', NO_STORED)
+  const { value: stored, loaded, error, retry } = useStorageValue<Partial<Settings>>('sync', 'settings', NO_STORED)
   // Merge over the defaults once per stored change, not once per render: a
   // fresh object every render would churn every downstream memo and context
   // value that rides on `settings` (the dashboard's whole wiring does).
-  const settings = useMemo<Settings>(() => ({ ...DEFAULT_SETTINGS, ...stored }), [stored])
-  const save = useCallback((patch: Partial<Settings>) => saveSettings(patch), [])
-  return { settings, save, loaded }
+  const settings = useMemo<Settings>(() => normalizeSettings(stored, DEFAULT_SETTINGS), [stored])
+  const save = useCallback((patch: Partial<Settings>) => {
+    if (!loaded || error) return Promise.reject(new Error('Read your saved settings before changing them.'))
+    return saveSettings(patch)
+  }, [loaded, error])
+  return { settings, save, loaded, error, retry }
 }

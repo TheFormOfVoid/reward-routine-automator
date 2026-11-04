@@ -132,10 +132,17 @@ export interface CouponsRow {
   available: number
 }
 
+export interface CouponActionRow {
+  at: number
+  status: 'checking' | 'applied' | 'none' | 'unverified' | 'failed'
+  detail: string
+  claimed: number
+  attempted: number
+}
+
 // One stock-change news record (redeemRestockNews / redeemSoldOutNews): the
-// amounts that flipped direction since the previous read. NOT dismissible —
-// a record clears only when the amount flips back (which moves it into the
-// opposite record).
+// amounts that flipped direction since the previous read. Dismissing its UI
+// notice stores a separate acknowledgement; the observation remains intact.
 export interface StockNews {
   at: number
   labels: string[]
@@ -220,16 +227,14 @@ export interface BatchState {
   remaining: number
   tabId: number | null
   nextRunAt: number | null
+  retryCount?: number
+  attemptId?: number
+  attemptStartedAt?: number
+  pendingQuery?: { query: string; api: string }
   // Set on a prowl batch (the 15–45-minute background mini-batches): its tabs
   // open in the background, and finishing it must NOT trigger the startup
   // routine's pending steps. Absent on manual/routine batches.
   prowl?: boolean
-  // Set once the FIRST search of a regular batch has run by navigating the tab
-  // straight to Bing's results URL instead of typing into the search box (user
-  // request, 2026-10-06). Every search after it — and every search of a prowl
-  // batch — types as before. A batch is written fresh, so it never carries over
-  // from the last one, and a stop clears it along with the batch.
-  firstSearchDone?: boolean
 }
 
 export interface RightSizeRun {
@@ -248,6 +253,14 @@ export interface RoutineState {
   pendingSteps: string[]
   pendingTabs: number[]
   skipped: SkippedStep[]
+  enabledSteps?: string[]
+  recoveryRound?: number
+  recoveryProgress?: Record<string, number>
+  recovering?: boolean
+  ownerUntilAt?: number
+  startedAt?: number
+  historyId?: string
+  recoveryActions?: number
 }
 
 export interface Captures {
@@ -257,12 +270,35 @@ export interface Captures {
 
 export interface RunState {
   v: 1
+  batchSequence?: number
   stopEpoch: number
+  pause?: { requestedAt: number; effectiveAt?: number }
   activity: { label: string } | null
   batch: BatchState | null
   rightSizeRun: RightSizeRun | null
   routine: RoutineState | null
   captures: Captures
+}
+
+export type RunOutcome = 'running' | 'completed' | 'incomplete' | 'unknown' | 'cancelled'
+export interface RunEvent {
+  at: number
+  step: string
+  outcome: string
+  detail: string
+  durationMs?: number
+}
+export interface RunRecord {
+  id: string
+  source: string
+  startedAt: number
+  endedAt?: number
+  status: RunOutcome
+  steps: string[]
+  events: RunEvent[]
+  beforePoints?: number
+  afterPoints?: number
+  detail?: string
 }
 
 // ---------- key names ----------
@@ -284,12 +320,17 @@ export const KEYS = {
   lastImageSearch: 'lastImageSearch',
   lastRedeem: 'lastRedeem',
   lastCoupons: 'lastCoupons',
+  lastCouponAction: 'lastCouponAction',
   redeemRestockNews: 'redeemRestockNews',
   redeemSoldOutNews: 'redeemSoldOutNews',
   redeemHistory: 'redeemHistory',
   lastOrders: 'lastOrders',
   lastOrdersLog: 'lastOrdersLog',
   dashLayout: 'dashLayout',
+  runHistory: 'runHistory',
+  activeRun: 'activeRun',
+  postponedRoutine: 'postponedRoutine',
+  restockNotifiedAt: 'restockNotifiedAt',
 } as const
 
 // ---------- typed storage.local helpers ----------

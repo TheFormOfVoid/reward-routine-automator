@@ -330,7 +330,21 @@ export default defineManifest({
   // extension can come to an omnibox search: Chrome exposes no API for the
   // omnibox and none for the default search engine, so no browser setting is
   // read or changed (ADR-023).
-  version: '6.9.7',
+  // 6.9.8: updating stops being manual. A PowerShell updater ships INSIDE the
+  // extension folder (updater/, copied into dist by a small Vite plugin), and
+  // targets its own parent directory — the folder Chrome loads unpacked is the
+  // folder it was unzipped into, so there is nothing to configure. Run it, and
+  // it finds the newest Gingerbread release, downloads it, copies it over the
+  // old files and deletes the previous version's hashed bundles. A reload click
+  // still remains, and always will: the files land on disk but Chrome holds the
+  // extension in memory and never re-reads the folder, and no API lets anything
+  // press Reload. So the popup's banner area and the routine's finish screen
+  // grow a Restart control that appears only when the folder's manifest.json
+  // version stops matching the loaded one (ADR-024).
+  // 6.9.9: bounded search recovery, final credited-progress retries, and normal
+  // selected browser tabs throughout. Existing permissions are unchanged.
+  // 6.9.10: reward/routine icon and clean completion heading.
+  version: '6.11.0',
   description:
     'Automatically perform Bing searches with realistic typing and dynamic intervals, and open daily sets on the Rewards dashboard.',
   // "downloads" is the one permission the fifth build adds (6.3.2): the

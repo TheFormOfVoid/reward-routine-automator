@@ -1,93 +1,48 @@
-import { AnimatePresence, motion } from 'framer-motion'
+import { sendMessage } from '../../shared/messages.ts'
+import { localDayKey } from '../../background/core/day.ts'
 import type { Stats, StockNews } from '../../shared/storage.ts'
+import { usePendingUpdate } from '../hooks/usePendingUpdate.ts'
 import { useRestockNews, useSoldOutNews } from '../hooks/useRedeem.ts'
+import { RestartIcon } from './icons.tsx'
+import { DismissibleNotice } from './NotificationCard.tsx'
 
-// The banners above the stage (src-donut parity, 2026-09-03 wording kept): the
-// Bing-app warning (danger — the one step the routine genuinely cannot do,
-// it only counts from the real phone app), a restock (green), and a newly
-// sold-out Overwatch amount (orange). NOT dismissible: the banners show while
-// the page's state says so, and the watch clears a record only when the
-// amount flips back — there is no close glyph on any of these.
-//
-// The preview prop is the Developer Option "preview every banner" button's
-// sample payloads (DOM-only in src-donut, local state here): nothing touches
-// storage, so the preview vanishes on the next popup open or the next real
-// record landing.
-
-function BingAppBanner({ stats }: { stats: Stats | null }) {
-  // The Bing-app activity value is a display string: the Earn page's streak
-  // card answers "Day 0 of 1 · 0/1", the dashboard's tile a bare "0/1" — the
-  // trailing progress pair is the check-in state in both (null / no pair
-  // leaves the banner off).
-  const appMatch = String(stats?.activities?.bingApp || '').match(/(\d+)\s*\/\s*(\d+)\s*$/)
-  const appStalled = !!appMatch && Number(appMatch[1]) === 0 && Number(appMatch[2]) > 0
-
-  return (
-    <AnimatePresence>
-      {appStalled && (
-        <motion.div
-          className="banner banner--danger"
-          role="alert"
-          title="This one only counts from the Bing phone app — the routine can’t finish it for you."
-          initial={{ opacity: 0, height: 0, marginBottom: 0 }}
-          animate={{ opacity: 1, height: 'auto', marginBottom: 11 }}
-          exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-        >
-          {/* Short by request (2026-09-03, kept from src-donut): the banner only
-           * says the check-in wasn't done; the why rides along as hover text. */}
-          Bing app check-in not done yet today.
-        </motion.div>
-      )}
-    </AnimatePresence>
-  )
-}
-
-function NewsBanner({ news, prefix, tone }: { news: StockNews | null; prefix: string; tone: 'good' | 'warn' }) {
-  const labels = (news && Array.isArray(news.labels)) ? news.labels : []
-  return (
-    <AnimatePresence>
-      {labels.length > 0 && (
-        <motion.div
-          className={`banner banner--${tone}`}
-          initial={{ opacity: 0, height: 0, marginBottom: 0 }}
-          animate={{ opacity: 1, height: 'auto', marginBottom: 11 }}
-          exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-        >
-          {prefix}
-          {labels.join(', ')}.
-        </motion.div>
-      )}
-    </AnimatePresence>
-  )
-}
-
-export function Banners({
-  stats,
-  preview,
-}: {
-  stats: Stats | null
-  preview: boolean
+function NewsBanner({ news, kind, prefix, tone, preview }: {
+  news: StockNews | null; kind: 'restock' | 'soldOut'; prefix: string; tone: 'good' | 'warn'; preview: boolean
 }) {
+  const labels = news && Array.isArray(news.labels) ? news.labels : []
+  if (!labels.length) return null
+  return <DismissibleNotice key={preview ? 'preview' : 'live'} kind={kind} fingerprint={JSON.stringify([news?.at, labels])} preview={preview}
+    dismissLabel={`Dismiss ${kind === 'restock' ? 'restock' : 'sold-out'} notification`} tone={tone}>
+    {prefix}{labels.join(', ')}.
+  </DismissibleNotice>
+}
+
+function UpdateBanner() {
+  const pending = usePendingUpdate()
+  if (!pending) return null
+  return <DismissibleNotice kind="update" fingerprint={pending} dismissLabel="Dismiss update notification" tone="update">
+    <span>Updated to {pending} — restart to apply.</span>
+    <button type="button" className="banner-btn" onClick={() => sendMessage({ type: 'RELOAD_EXTENSION' })}>
+      <RestartIcon aria-hidden="true" /> Restart
+    </button>
+  </DismissibleNotice>
+}
+
+export function Banners({ stats, preview }: { stats: Stats | null; preview: boolean }) {
   const restock = useRestockNews()
   const soldOut = useSoldOutNews()
-
-  // The dev preview overrides both news reads with sample payloads — one
-  // restocked amount, one sold-out — plus the un-done Bing-app check-in, so
-  // the wording and styling can be checked without waiting for the real
-  // thing (nothing touches storage; the preview vanishes with the state).
-  const previewNews = (labels: string[]): StockNews => ({ at: Date.now(), labels })
-  const previewStats: Stats | null = preview
-    ? {
-        ...(stats || { availablePoints: null, readyToClaim: null, dailyStreak: null, stampBonus: null, searchPoints: null, activities: { bingSearch: null, dailySet: null, bingApp: null, visualSearch: null } }),
-        activities: { ...(stats?.activities || { bingSearch: null, dailySet: null, bingApp: null, visualSearch: null }), bingApp: '0/1' },
-      }
-    : stats
-
-  return (
-    <div className="banners">
-      <BingAppBanner stats={previewStats} />
-      <NewsBanner news={preview ? previewNews(['500 coins']) : restock} prefix="Overwatch coins available: " tone="good" />
-      <NewsBanner news={preview ? previewNews(['2000 coins']) : soldOut} prefix="No longer available: " tone="warn" />
-    </div>
-  )
+  const match = String(stats?.activities?.bingApp || '').match(/(\d+)\s*\/\s*(\d+)\s*$/)
+  const appStalled = preview || (!!match && Number(match[1]) === 0 && Number(match[2]) > 0)
+  return <div className="banners">
+    <UpdateBanner />
+    {appStalled && <DismissibleNotice key={preview ? 'preview' : 'live'} kind="bingApp" fingerprint={localDayKey()} preview={preview}
+      dismissLabel="Dismiss Bing app notification" tone="danger"
+      title="This one only counts from the Bing phone app — the routine can’t finish it for you.">
+      Bing app check-in not done yet today.
+    </DismissibleNotice>}
+    <NewsBanner kind="restock" news={preview ? { at: 0, labels: ['500 coins'] } : restock}
+      prefix="Overwatch coins available: " tone="good" preview={preview} />
+    <NewsBanner kind="soldOut" news={preview ? { at: 0, labels: ['2000 coins'] } : soldOut}
+      prefix="No longer available: " tone="warn" preview={preview} />
+  </div>
 }

@@ -7,6 +7,7 @@
 // Referenced type-only by STREAKS (below) for its activities keys — a
 // compile-time, one-way reference to the storage schema, no runtime coupling.
 import type { Stats } from './storage.ts'
+import { normalizeSettings, validateSettings } from './settings-validation.ts'
 
 export type TabCloseMode = 'perStep' | 'routine'
 export type Appearance = 'light' | 'dark' | 'auto'
@@ -97,7 +98,11 @@ export interface Settings {
   keepEarningMaxTiles: number // 0 = however many are there today
   scheduledRunEnabled: boolean // The scheduled daily run (Phase 2 wiring)
   scheduledRunTime: string // local "HH:MM", 24-hour
+  quietHoursEnabled: boolean
+  quietHoursStart: string
+  quietHoursEnd: string
   restockWatcherEnabled: boolean // The restock watcher (Phase 2 wiring)
+  restockIntervalMin: number
   redeemGoalPts: number // The Today view's points goal (0 = none)
   animationsEnabled: boolean // Popup motion (also gated on reduced-motion)
   lowPowerMode: boolean // One switch for everything that moves: overrides animationsEnabled, backdrops go static
@@ -106,6 +111,8 @@ export interface Settings {
   background: BackgroundStyle // Popup backdrop style
   backgroundBrightness: number // Backdrop brightness, in % (100 = as drawn)
   tileBlur: number // Glass blur of the cards over the backdrop, in px
+  topBarBackground: boolean // Block scrolling content behind the floating header
+  bottomBarBackground: boolean // Block scrolling content behind the floating bottom controls
   accentColor: string // Explicit brand color overriding the theme's ("" = theme)
   appearance: Appearance // light/dark/auto
   refreshStatsOnPopupOpen: boolean // Re-read stats on popup open
@@ -156,7 +163,11 @@ export const DEFAULT_SETTINGS: Settings = {
   keepEarningMaxTiles: 0,
   scheduledRunEnabled: false,
   scheduledRunTime: '00:20',
+  quietHoursEnabled: false,
+  quietHoursStart: '22:00',
+  quietHoursEnd: '07:00',
   restockWatcherEnabled: false,
+  restockIntervalMin: 120,
   redeemGoalPts: 0,
   animationsEnabled: true,
   // Off by default (user request, 2026-09-11): flipping it must be a
@@ -170,6 +181,8 @@ export const DEFAULT_SETTINGS: Settings = {
   background: 'cursor',
   backgroundBrightness: 100,
   tileBlur: 0,
+  topBarBackground: false,
+  bottomBarBackground: false,
   accentColor: '#8b5cf6',
   appearance: 'auto',
   refreshStatsOnPopupOpen: false,
@@ -183,7 +196,7 @@ export const DEFAULT_SETTINGS: Settings = {
 // user set survives and a key an update adds falls back to its default.
 export async function getSettings(): Promise<Settings> {
   const { settings } = await chrome.storage.sync.get('settings')
-  return { ...DEFAULT_SETTINGS, ...((settings as Partial<Settings>) || {}) }
+  return normalizeSettings(settings, DEFAULT_SETTINGS)
 }
 
 // Merge a patch into the stored settings (the popup's writes). Read-merge-write
@@ -191,7 +204,7 @@ export async function getSettings(): Promise<Settings> {
 export async function saveSettings(patch: Partial<Settings>): Promise<Settings> {
   // Web Locks serialize saves across the popup and dashboard, not just within
   // one React tree. Read inside the lock so every patch sees the last write.
-  const captured = structuredClone(patch)
+  const captured = validateSettings(structuredClone(patch), DEFAULT_SETTINGS, true)
   return navigator.locks.request('zoomies-settings', async () => {
     const current = await getSettings()
     const next = { ...current, ...captured }

@@ -18,6 +18,8 @@ import { setLastRewards } from '../core/log.ts'
 import { getSettings } from '../../shared/settings.ts'
 import { claimDashboardPoints } from '../injections/rewards-tiles.ts'
 import { REWARDS_DASHBOARD } from './rewards-section.ts'
+import { withDeadline } from '../pure/search-recovery.ts'
+import { createNormalTab } from '../core/normal-tabs.ts'
 
 // How long the page-side claim routine waits for the panel's verdict after
 // clicking the claim card before reporting "unknown" — the click may still
@@ -63,20 +65,22 @@ async function reportClaimResult(result: ClaimResult | null, fallbackDump?: stri
 
 // Worker side of a claim: inject the page routine and report what came back.
 // Never throws — executeScript failures and missing results are outcomes too.
-async function runClaimFlow(tabId: number): Promise<void> {
+async function runClaimFlow(tabId: number, stopEpoch: number): Promise<void> {
+  holdKeepAlive()
   try {
-    const [injection] = await chrome.scripting.executeScript({
+    const [injection] = await withDeadline(chrome.scripting.executeScript({
       target: { tabId },
       func: claimDashboardPoints,
-      args: [CLAIM_TIMEOUT_MS],
-    })
+      args: [CLAIM_TIMEOUT_MS, { stopEpoch, expiresAt: Date.now() + 40000 }],
+    }), 45000, 'Claim page reader')
+    if (await currentStopEpoch() !== stopEpoch) return
     await reportClaimResult((injection?.result ?? null) as ClaimResult | null)
   } catch (e) {
     console.warn('Claim injection ended early:', e)
     // The injection error is the only evidence this branch has — it becomes the
     // row's dump instead of dying in the console.
     await reportClaimResult(null, String((e && (e as Error).message) || e))
-  }
+  } finally { releaseKeepAlive() }
 }
 
 // A manual claim from the popup: open the dashboard, press the claim card,
@@ -93,7 +97,7 @@ export async function runManualClaim(): Promise<void> {
   try {
     await beginTabCapture('claim')
 
-    const rewardsTab = await chrome.tabs.create({ url: REWARDS_DASHBOARD, pinned: false })
+    const rewardsTab = await withDeadline(createNormalTab(REWARDS_DASHBOARD), 10000, 'Claim tab opening')
     const rewardsTabId = rewardsTab.id
     if (rewardsTabId == null) {
       await setLastRewards('Claim — could not open the Rewards tab', false)
@@ -116,7 +120,7 @@ export async function runManualClaim(): Promise<void> {
       return
     }
 
-    await runClaimFlow(rewardsTabId)
+    await runClaimFlow(rewardsTabId, myEpoch)
   } finally {
     // Not closeCapturedTabs(): that helper branches on the tab-close mode and a
     // per-step setting, neither of which applies here. endTabCapture() hands
@@ -140,7 +144,7 @@ export async function runManualClaim(): Promise<void> {
         if (await stopped()) {
           console.log('Claim: stopped during the settle wait; tab left open.')
         } else {
-          const closed = await closeTabs(ids, settings.keepPinnedTabs)
+          const closed = await closeTabs(ids, settings.keepPinnedTabs, myEpoch)
           if (closed) console.log(`Closed ${closed} tab(s) opened by "claim".`)
         }
       } finally {
@@ -166,7 +170,7 @@ export async function runStartupClaim(): Promise<void> {
   try {
     await beginTabCapture('claim')
 
-    const rewardsTab = await chrome.tabs.create({ url: REWARDS_DASHBOARD, pinned: false })
+    const rewardsTab = await withDeadline(createNormalTab(REWARDS_DASHBOARD), 10000, 'Claim tab opening')
     const rewardsTabId = rewardsTab.id
     if (rewardsTabId == null) {
       await setLastRewards('Claim — could not open the Rewards tab', false)
@@ -191,7 +195,7 @@ export async function runStartupClaim(): Promise<void> {
       return
     }
 
-    await runClaimFlow(rewardsTabId)
+    await runClaimFlow(rewardsTabId, myEpoch)
   } finally {
     // A no-op after a stop: the stop write cleared the capture bookkeeping, so
     // the tab stays open.

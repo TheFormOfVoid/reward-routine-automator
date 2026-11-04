@@ -10,21 +10,15 @@
 // steps are a lattice).
 
 import { useStats } from '../../../popup/hooks/useStats.ts'
-import { STREAKS } from '../../../shared/settings.ts'
-import { StreakCard } from './shared.tsx'
+import { WeeklyStreaks } from '../../../popup/components/WeeklyStreaks.tsx'
 import { Tile } from './Tile.tsx'
 import type { TileProps } from './Tile.tsx'
 
 export function StreaksTile({ seat, ...rest }: TileProps) {
   const stats = useStats()
-  const gridClass = seat.h === 1 ? 'streak-grid--strip' : seat.w <= 3 ? 'streak-grid--quad' : ''
   return (
     <Tile id="streaks" title="Today's streaks" seat={seat} {...rest}>
-      <div className={`streak-grid${gridClass ? ' ' + gridClass : ''}`}>
-        {STREAKS.map(({ key, label }) => (
-          <StreakCard key={key} label={label} value={stats?.activities?.[key] || null} />
-        ))}
-      </div>
+      <WeeklyStreaks stats={stats} compact={seat.h === 1} />
     </Tile>
   )
 }

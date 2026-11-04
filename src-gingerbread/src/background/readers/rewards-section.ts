@@ -10,6 +10,9 @@ import { setLastRewards } from '../core/log.ts'
 import { getSettings } from '../../shared/settings.ts'
 import type { Settings } from '../../shared/settings.ts'
 import { openRewardsSectionTiles } from '../injections/rewards-tiles.ts'
+import { withDeadline } from '../pure/search-recovery.ts'
+import { createNormalTab } from '../core/normal-tabs.ts'
+import { holdKeepAlive, releaseKeepAlive } from '../core/keepalive.ts'
 
 // Both Rewards entry points serve the same app, but which section renders on
 // which has moved around — so each section carries its own order of URLs to try
@@ -75,9 +78,10 @@ async function runRewardsSection(stepId: SectionId): Promise<void> {
   // From here until closeCapturedTabs() below, every new tab is attributed to
   // this step — which is how the tabs the tiles open get cleaned up too.
   await beginTabCapture(stepId)
+  holdKeepAlive()
 
   try {
-    const rewardsTab = await chrome.tabs.create({ url: section.urls[0], pinned: false })
+    const rewardsTab = await withDeadline(createNormalTab(section.urls[0]), 10000, 'Rewards tab opening')
     const rewardsTabId = rewardsTab.id
     if (rewardsTabId == null) {
       await setLastRewards(`${section.label} — could not open the Rewards tab`, false)
@@ -130,11 +134,12 @@ async function runRewardsSection(stepId: SectionId): Promise<void> {
 
       opened = -1
       try {
-        const [injection] = await chrome.scripting.executeScript({
+        const [injection] = await withDeadline(chrome.scripting.executeScript({
           target: { tabId: rewardsTabId },
           func: openRewardsSectionTiles,
-          args: [section.names, maxTiles, section.label, section.skipSpent === true],
-        })
+          args: [section.names, maxTiles, section.label, section.skipSpent === true,
+            { stopEpoch: myEpoch, expiresAt: Date.now() + 40000 }],
+        }), 45000, 'Rewards tile reader')
         const value = injection && injection.result
         opened = typeof value === 'number' ? value : -1
       } catch (e) {
@@ -142,6 +147,7 @@ async function runRewardsSection(stepId: SectionId): Promise<void> {
       }
 
       // Only a definite zero means "this section is not on this page".
+      if (await stopped()) { halted = true; await setLastRewards(`${section.label} — stopped`, false); break }
       if (opened !== 0) break
     }
 
@@ -154,8 +160,10 @@ async function runRewardsSection(stepId: SectionId): Promise<void> {
   } finally {
     // A no-op after a stop: the stop write cleared the capture bookkeeping, so
     // the tabs stay open.
-    await closeCapturedTabs(stepId, section.closeKey)
-    await endActivity(section.label)
+    try {
+      await closeCapturedTabs(stepId, section.closeKey)
+      await endActivity(section.label)
+    } finally { releaseKeepAlive() }
   }
 }
 

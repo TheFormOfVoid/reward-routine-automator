@@ -19,11 +19,14 @@
 import { beginActivity, endActivity, currentStopEpoch } from '../core/run-state.ts'
 import { localDayKey } from '../core/day.ts'
 import { closeTabs, waitForTabComplete } from '../core/tabs.ts'
+import { createNormalTab } from '../core/normal-tabs.ts'
+import { withDeadline } from '../pure/search-recovery.ts'
 import { holdKeepAlive, releaseKeepAlive } from '../core/keepalive.ts'
 import { setLastStatsLog } from '../core/log.ts'
+import { recordRunEvent } from '../core/run-history.ts'
 import { getSettings } from '../../shared/settings.ts'
 import { KEYS, getLocal, setLocal } from '../../shared/storage.ts'
-import type { HistoryEntry, RawStats } from '../../shared/storage.ts'
+import type { HistoryEntry, RawStats, Stats } from '../../shared/storage.ts'
 import { mergeStats } from '../pure/merge-stats.ts'
 import { parsePoints, recordDay } from '../pure/history.ts'
 import { readRewardsStats } from '../injections/stats-read.ts'
@@ -38,6 +41,8 @@ const STATS_HYDRATION_MS = 12000
 // waited out (STATS_HYDRATION_MS above), so its own poll only needs to
 // cover the trigger's late render — not a full hydration.
 const COUPON_READ_MS = 5000
+// Leave room inside callers' 90s deadline for tab cleanup and guard release.
+const STATS_RUN_BUDGET_MS = 75000
 
 // In-flight guards, shared with the redeem watch (readers/redeem.ts): a
 // burst (Refresh button, popup-open refresh, the routine's stats step) fires
@@ -60,12 +65,88 @@ interface PageRead {
   stats: RawStats | null
 }
 
-export async function refreshStats(): Promise<void> {
-  if (READ_RUN_GUARDS.stats) {
-    console.log('Stats: a read is already running; skipping.')
-    return
+export interface StatsReadRequest {
+  scope?: 'full' | 'search'
+  /** The read must have begun after the action being verified. */
+  notBefore?: number
+  minStartedAt?: number
+  /** Reuse only explicitly requested, recent evidence; default is a fresh read. */
+  maxAgeMs?: number
+}
+
+export interface StatsReadResult {
+  scope: 'full' | 'search'
+  startedAt: number
+  completedAt: number
+  stats: Stats | null
+  observed: string[]
+  stopEpoch: number | null
+}
+
+let statsInFlight: { scope: 'full' | 'search'; promise: Promise<StatsReadResult> } | null = null
+let lastEvidence: StatsReadResult | null = null
+let evidenceRevision = 0
+
+export function invalidateStatsEvidence(): void { lastEvidence = null; evidenceRevision++ }
+
+function observedFields(stats: Stats | null): string[] {
+  if (!stats) return []
+  return Object.entries(stats).flatMap(([key, value]) => key === 'at' || value == null ? []
+    : key === 'activities' ? Object.entries(value).filter(([, v]) => v != null).map(([k]) => 'activities.' + k)
+      : [key])
+}
+
+// Share the actual result, not a boolean guard. A caller checking work performed
+// after an older reader began waits for that reader, then starts a new one.
+export async function refreshStats(request: StatsReadRequest = {}): Promise<StatsReadResult> {
+  // Resolve the request's owner before inspecting/reserving the shared reader.
+  // There are no awaits between the acquisition check and setting statsInFlight.
+  const requestEpoch = await currentStopEpoch()
+  const scope = request.scope || 'full'
+  const minimum = Math.max(0, Number(request.notBefore || request.minStartedAt) || 0)
+  const maxAge = Math.max(0, Number(request.maxAgeMs) || 0)
+  const accepts = (result: StatsReadResult) => (result.scope === 'full' || scope === 'search') &&
+    result.startedAt >= minimum && (scope !== 'search' || result.observed.includes('searchPoints'))
+  if (statsInFlight) {
+    const result = await statsInFlight.promise
+    if (result.stopEpoch === requestEpoch && accepts(result)) return result
+    if (requestEpoch !== await currentStopEpoch()) return { ...result, stats: null, observed: [] }
+    return refreshStats(request)
   }
+  if (maxAge && lastEvidence && accepts(lastEvidence) && Date.now() - lastEvidence.startedAt <= maxAge &&
+      lastEvidence.stopEpoch === requestEpoch) return lastEvidence
+
+  const startedAt = Date.now()
+  const revision = evidenceRevision
+  let stats: Stats | null = null
+  const pending = collectStats(scope, (value, epoch) => { if (epoch === requestEpoch) stats = value })
+    .then(async (): Promise<StatsReadResult> => {
+      if (requestEpoch !== await currentStopEpoch()) stats = null
+      return { scope, startedAt, completedAt: Date.now(), stats,
+        observed: observedFields(stats), stopEpoch: requestEpoch }
+    })
+  statsInFlight = { scope, promise: pending }
+  try {
+    const result = await pending
+    if (result.stats && revision === evidenceRevision) lastEvidence = result
+    return result
+  } finally {
+    if (statsInFlight?.promise === pending) statsInFlight = null
+  }
+}
+
+async function collectStats(scope: 'full' | 'search', publish: (stats: Stats, epoch: number | null) => void): Promise<void> {
   READ_RUN_GUARDS.stats = true
+  const startedAt = Date.now()
+  let historyId: string | undefined
+  let readFound = false
+  const readDeadline = Date.now() + STATS_RUN_BUDGET_MS
+  const expired = (): boolean => Date.now() >= readDeadline
+  const availableMs = (maximum: number): number => {
+    const remaining = readDeadline - Date.now()
+    if (remaining <= 0) throw new Error('Stats run timed out')
+    return Math.min(maximum, remaining)
+  }
 
   // The read outlives the idle window: a 15s load wait plus a 12s hydration
   // poll per page, mostly silent (a tab listener and a page-side loop), so an
@@ -76,22 +157,43 @@ export async function refreshStats(): Promise<void> {
 
   // Marks this run as the current activity so the popup's Stop button covers
   // it too; the returned epoch tells this run when it has been stopped.
-  const myEpoch = await beginActivity('Stats')
-  const stopped = (): Promise<boolean> => currentStopEpoch().then((v) => v !== myEpoch)
+  let myEpoch: number | null = null
+  const stopped = (): Promise<boolean> => myEpoch == null ? Promise.resolve(false)
+    : withDeadline(currentStopEpoch(), 3000, 'Stats stop check').then((v) => v !== myEpoch)
+  // Check both sides of the async stop read: it too can outlive our budget.
+  const unavailable = async (): Promise<boolean> => expired() || await stopped() || expired()
+  const saveReadValue = (key: string, value: unknown): Promise<void> => {
+    const timeout = availableMs(5000)
+    return withDeadline(setLocal(key, value), timeout, 'Stats storage write')
+  }
+  const reportRead = (detail: string, ok: boolean, dump?: string): Promise<void> => {
+    const timeout = availableMs(3000)
+    return withDeadline(setLastStatsLog(detail, ok, dump), timeout, 'Stats log write')
+  }
 
   // The tabs this run opened (closed in the finally). The shared capture list
   // is reset by every new run, so two overlapping bursts used to sweep each
   // other's tabs.
   const ownTabIds: number[] = []
 
+  async function executeStatsScript<Args extends unknown[], Result>(
+    injection: chrome.scripting.ScriptInjection<Args, Result>,
+  ) {
+    const timeout = availableMs(STATS_HYDRATION_MS + 5000)
+    const result = await withDeadline(chrome.scripting.executeScript(injection), timeout, 'Stats reader')
+    // A reply that arrived after suspension/timeout is not a fresh snapshot.
+    if (expired()) throw new Error('Stats run timed out')
+    return result
+  }
+
   // Returns { tabId, stats } — stats may be null when the page never answered
   // — or null outright when the run was stopped (the merge and the dump both
   // treat that as "no page").
   async function readPage(url: string, waitMode: string, label: string): Promise<PageRead | null> {
-    // Background tab: a read is never meant to be seen (the tab closes when the
-    // read finishes), and an active tab would steal focus — which closes an
-    // open popup mid-refresh.
-    const tab = await chrome.tabs.create({ url, pinned: false, active: false })
+    // React hydration needs a selected tab. Stay inside the user's existing
+    // normal window without bringing that window to the OS foreground.
+    const timeout = availableMs(10000)
+    const tab = await withDeadline(createNormalTab(url), timeout, 'Stats tab opening')
     const tabId = tab.id
     if (tabId == null) {
       console.warn(`Stats: the ${label} tab opened without an id.`)
@@ -101,62 +203,24 @@ export async function refreshStats(): Promise<void> {
 
     // A stop that landed while the tab was opening. Stopping is not finishing:
     // the tab stays open and the injection never runs.
-    if (await stopped()) {
+    if (await unavailable()) {
       console.log(`Stats: stopped while opening the ${label} tab.`)
       return null
     }
 
-    const loaded = await waitForTabComplete(tabId, 15000)
+    const loadTimeout = availableMs(15000)
+    const loaded = await withDeadline(waitForTabComplete(tabId, loadTimeout), loadTimeout, 'Stats page load')
     if (!loaded) console.warn(`Stats: ${label} page did not finish loading in time.`)
 
     // Stop checkpoint after the load wait: the injection is the part a stop is
     // meant to prevent.
-    if (await stopped()) {
+    if (await unavailable()) {
       console.log(`Stats: stopped before the ${label} reader could run.`)
       return null
     }
 
-    // The visibility escalation: a hidden tab never gets a render pass, so the
-    // Today's-points flyout the reader needs to click open may never open in a
-    // tab the browser will not draw. This watcher probes the read's own press
-    // log (window.__meowPointsPress, updated every poll); once several presses
-    // have been made and the card still shows no sign of opening, the tab is
-    // moved into a small unfocused popup window (focused:false, so the user's
-    // focus and an open popup are not stolen), which makes the document visible
-    // without reloading it. The read keeps running; the next press lands in a
-    // tab that renders, and the read still closes the tab in its own sweep.
-    let escalation: Promise<unknown> | null = null
-    const watcher = setInterval(async () => {
-      try {
-        const [probe] = await chrome.scripting.executeScript({
-          target: { tabId },
-          func: () => {
-            const log = (window as { __meowPointsPress?: { presses: number; everExpanded?: boolean } })
-              .__meowPointsPress
-            return log
-              ? {
-                  presses: log.presses,
-                  everExpanded: !!log.everExpanded,
-                  visibility: document.visibilityState,
-                }
-              : null
-          },
-        })
-        const seen = probe && probe.result
-        if (seen && seen.presses >= 3 && !seen.everExpanded && seen.visibility === 'hidden') {
-          clearInterval(watcher)
-          escalation = chrome.windows
-            .create({ tabId, type: 'popup', focused: false })
-            .catch((e) => console.warn(`Stats: could not show the ${label} tab:`, e))
-        }
-      } catch {
-        // The tab closed mid-read (the sweep, a stop) — nothing to escalate.
-        clearInterval(watcher)
-      }
-    }, 2000)
-
     try {
-      const [injection] = await chrome.scripting.executeScript({
+      const [injection] = await executeStatsScript({
         target: { tabId },
         func: readRewardsStats,
         args: [STATS_HYDRATION_MS, waitMode],
@@ -165,9 +229,6 @@ export async function refreshStats(): Promise<void> {
     } catch (e) {
       console.warn(`Stats: ${label} injection ended early:`, e)
       return { tabId, stats: null }
-    } finally {
-      clearInterval(watcher)
-      await escalation
     }
   }
 
@@ -177,8 +238,9 @@ export async function refreshStats(): Promise<void> {
   // shows what it actually looked like. The evidence is also RETURNED — the
   // Activity row (setLastStatsLog) carries it as hover text.
   async function dumpEarnEvidence(tabId: number): Promise<{ url: string; streaksMarkup: string } | null> {
+    if (readDeadline - Date.now() < 2000) return null
     try {
-      const [injection] = await chrome.scripting.executeScript({
+      const [injection] = await executeStatsScript({
         target: { tabId },
         func: () => {
           const section =
@@ -206,8 +268,9 @@ export async function refreshStats(): Promise<void> {
   // from every read tab that still carries one, so the next matcher revision
   // gets written against that markup.
   async function dumpPointsEvidence(tabId: number): Promise<Record<string, unknown> | null> {
+    if (readDeadline - Date.now() < 2000) return null
     try {
-      const [injection] = await chrome.scripting.executeScript({
+      const [injection] = await executeStatsScript({
         target: { tabId },
         func: () => {
           const labels = Array.from(document.querySelectorAll('p.text-labelControl'))
@@ -260,39 +323,40 @@ export async function refreshStats(): Promise<void> {
   }
 
   try {
-    // Both pages at once: the reads are independent — separate tabs, separate
-    // injections, each returning as soon as its own half hydrates — so the
-    // refresh costs the SLOWER page's time, not the sum of both. The streak
-    // cards are Earn-only (2026-09 redesign), so the Earn read is what answers
-    // the four activity stats; the merge and every guard below are unchanged (a
-    // stopped or failed read is null either way).
-    const [dashboardRead, earnRead] = await Promise.all([
-      readPage(REWARDS_DASHBOARD, 'cards', 'dashboard'),
-      readPage(REWARDS_EARN, 'streaks', 'Earn'),
-    ])
-    if ((dashboardRead === null || earnRead === null) && (await stopped())) {
-      return
-    }
+    myEpoch = await withDeadline(beginActivity('Stats'), availableMs(5000), 'Stats start')
+    historyId = (await getLocal<{ routine?: { historyId?: string } }>(KEYS.runState).catch(() => undefined))?.routine?.historyId
+    // Read selected tabs in sequence: two parallel readers would immediately
+    // hide each other's page and reproduce the hydration stall. A tab selection
+    // never calls windows.update({ focused: true }) or creates a taskbar window.
+    const dashboardRead = await readPage(REWARDS_DASHBOARD, scope === 'search' ? 'search' : 'cards', 'dashboard')
+    if (await unavailable()) return
+    // A search decision only needs the points flyout. Earn remains a fallback
+    // when the dashboard did not answer, and a full read still visits both.
+    const earnRead = scope === 'full' || dashboardRead?.stats?.searchPoints == null
+      ? await readPage(REWARDS_EARN, scope === 'search' ? 'search' : 'streaks', 'Earn') : null
+    if (await unavailable()) return
 
     // The coupon trigger ("Coupon (N)") lives on the dashboard tab this read
     // has already waited out, so its own poll only needs to cover the
     // trigger's late render — not a full hydration. A null result (nothing
     // recognized) keeps the last good count.
-    try {
-      const [couponInjection] = await chrome.scripting.executeScript({
+    if (scope === 'full' && dashboardRead) try {
+      const [couponInjection] = await executeStatsScript({
         target: { tabId: dashboardRead!.tabId },
         func: readCouponCount,
         args: [COUPON_READ_MS],
       })
       const couponCount = (couponInjection && couponInjection.result) as number | null
-      if (typeof couponCount === 'number') {
-        await setLocal(KEYS.lastCoupons, { at: Date.now(), available: couponCount })
+      if (typeof couponCount === 'number' && !(await unavailable())) {
+        await saveReadValue(KEYS.lastCoupons, { at: Date.now(), available: couponCount })
       } else {
         console.warn('Coupons: the count read returned nothing; keeping the last count.')
       }
     } catch (e) {
       console.warn('Stats: the coupon count read ended early:', e)
     }
+
+    if (await unavailable()) return
 
     const dashboardStats = dashboardRead && dashboardRead.stats
     const earnStats = earnRead && earnRead.stats
@@ -302,9 +366,9 @@ export async function refreshStats(): Promise<void> {
     const problems: string[] = []
     const dumps: string[] = []
     if (dashboardStats == null) problems.push('the dashboard page did not answer')
-    if (earnStats == null) problems.push('the Earn page did not answer')
+    if (scope === 'full' && earnStats == null) problems.push('the Earn page did not answer')
 
-    if (earnRead && Object.values((earnStats && earnStats.activities) || {}).every((v) => v == null)) {
+    if (scope === 'full' && earnRead && Object.values((earnStats && earnStats.activities) || {}).every((v) => v == null)) {
       const evidence = await dumpEarnEvidence(earnRead.tabId)
       if (evidence) dumps.push(evidence.streaksMarkup || '')
       // Only when the page answered at all — a null read already reported
@@ -351,7 +415,7 @@ export async function refreshStats(): Promise<void> {
     // An all-null merge is two pages that never answered, not a Rewards account
     // with nothing to show — store nothing rather than overwriting the last
     // good stats with empties and a fresh timestamp.
-    const found =
+    const found = scope === 'search' ? merged.searchPoints != null :
       merged.availablePoints != null ||
       merged.readyToClaim != null ||
       merged.dailyStreak != null ||
@@ -359,18 +423,32 @@ export async function refreshStats(): Promise<void> {
       merged.searchPoints != null ||
       Object.values(merged.activities || {}).some((v) => v != null)
 
+    if (await unavailable()) return
     if (found) {
-      await setLocal(KEYS.lastStats, { ...merged, at: Date.now() })
-      console.log('Stats: read the dashboard and the Earn page.')
+      const collected: Stats = { ...merged, at: Date.now() }
+      if (scope === 'full') {
+        await saveReadValue(KEYS.lastStats, collected)
+      } else {
+        // Updating one field must not give stale activity/claim evidence a new
+        // account-wide timestamp. Search callers receive fresh narrow evidence
+        // directly; full-routine verdicts still require a full read.
+        const previous = await withDeadline(getLocal<Stats>(KEYS.lastStats), availableMs(5000), 'Stats previous snapshot')
+        await saveReadValue(KEYS.lastStats, { ...(previous || { ...merged, at: 0 }), searchPoints: merged.searchPoints })
+      }
+      publish(collected, myEpoch)
+      readFound = true
+      console.log(scope === 'full' ? 'Stats: read the dashboard and the Earn page.' : 'Stats: read search progress.')
 
       // The points history (ADR-020): one balance snapshot per local day — the
       // day's first and its latest — so the popup can show earned-today and a
       // trend line. Pure math in pure/history; this is the only write. A read
       // without a balance records nothing, keeping the last good snapshot.
-      const points = parsePoints(merged.availablePoints)
+      const points = scope === 'full' ? parsePoints(merged.availablePoints) : null
       if (points != null) {
-        const history = await getLocal<HistoryEntry[]>(KEYS.pointsHistory)
-        await setLocal(KEYS.pointsHistory, recordDay(history, localDayKey(), points))
+        const history = await withDeadline(getLocal<HistoryEntry[]>(KEYS.pointsHistory), availableMs(5000), 'Stats history')
+        if (!(await unavailable())) {
+          await saveReadValue(KEYS.pointsHistory, recordDay(history, localDayKey(), points))
+        }
       }
     } else {
       console.warn('Stats: the readers found nothing; keeping the last stats.')
@@ -378,8 +456,8 @@ export async function refreshStats(): Promise<void> {
 
     // The row itself — but stopping is not failing: a stopped run reports
     // nothing (the user cancelled it; there is no outcome to log).
-    if (!(await stopped())) {
-      await setLastStatsLog(
+    if (!(await unavailable())) {
+      await reportRead(
         problems.length
           ? 'Stats — ' + problems.join('; ') + '.'
           : found
@@ -389,17 +467,28 @@ export async function refreshStats(): Promise<void> {
         dumps.join('\n'),
       )
     }
+  } catch (e) {
+    console.warn('Stats: read failed; keeping the last stats:', e)
+    if (!(await unavailable())) {
+      await reportRead('Stats — read failed; kept the last stats.', false).catch((error) => console.warn('Stats: failure log write failed:', error))
+    }
   } finally {
     // Closes only the tabs THIS run opened. A stopped run leaves them open —
     // stopping is not finishing.
-    if (ownTabIds.length && !(await stopped())) {
-      const settings = await getSettings()
-      const closed = await closeTabs(ownTabIds, settings.keepPinnedTabs)
-      if (closed) console.log(`Closed ${closed} tab(s) opened by "stats".`)
+    try {
+      if (ownTabIds.length && !(await stopped())) {
+        const settings = await withDeadline(getSettings(), 2000, 'Stats cleanup settings')
+        const closed = await withDeadline(closeTabs(ownTabIds, settings.keepPinnedTabs, myEpoch ?? undefined), 5000, 'Stats tab cleanup')
+        if (closed) console.log(`Closed ${closed} tab(s) opened by "stats".`)
+      }
+    } catch (e) {
+      console.warn('Stats: tab cleanup failed:', e)
+    } finally {
+      await withDeadline(endActivity('Stats'), 2000, 'Stats activity cleanup').catch((e) => console.warn('Stats: activity cleanup failed:', e))
+      releaseKeepAlive()
+      READ_RUN_GUARDS.stats = false
+      if (historyId) await withDeadline(recordRunEvent(historyId, 'stats/' + scope, readFound ? 'observed' : 'unknown',
+        scope === 'full' ? 'Full account read' : 'Search-progress read', Date.now() - startedAt), 2000, 'Stats trace write').catch(console.warn)
     }
-
-    await endActivity('Stats')
-    releaseKeepAlive()
-    READ_RUN_GUARDS.stats = false
   }
 }

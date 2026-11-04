@@ -1,0 +1,48 @@
+name: Gingerbread checks
+
+on:
+  push:
+    paths: ['src-gingerbread/**', '.github/workflows/gingerbread.yml', '.node-version']
+  pull_request:
+    paths: ['src-gingerbread/**', '.github/workflows/gingerbread.yml', '.node-version']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: src-gingerbread
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: src-gingerbread/package-lock.json
+      - run: npm ci
+      - run: npm run verify
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: src-gingerbread
+    env:
+      GINGERBREAD_BROWSER: chromium
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: src-gingerbread/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npm run verify:browser

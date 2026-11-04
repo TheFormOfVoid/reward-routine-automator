@@ -30,6 +30,8 @@ import { setLastTabAction } from '../core/log.ts'
 import { scheduledDue, nextScheduledAt } from '../pure/schedule.ts'
 import { runStartupSequence } from './routine.ts'
 import { getLocal, setLocal, KEYS } from '../../shared/storage.ts'
+import { inQuietHours } from '../pure/run-tools.ts'
+import { localDayKey } from '../core/day.ts'
 
 // The punctual alarm: a one-shot at the next occurrence, so an idle-but-awake
 // worker fires ON the minute instead of waiting for the next heartbeat tick.
@@ -38,6 +40,49 @@ export const SCHEDULED_ALARM = 'scheduledRun'
 // scheduledDue(). This is what makes "left it for a day" work — no single
 // delivery has to land at the right instant.
 export const SCHEDULED_HEARTBEAT = 'scheduledHeartbeat'
+export const POSTPONED_ALARM = 'postponedRoutine'
+export interface PostponedRoutine { day: string; until: number; source?: 'user' | 'startup' }
+
+export async function postponeRoutine(minutes: number): Promise<void> {
+  const duration = Math.max(5, Math.min(24 * 60, Math.floor(Number(minutes) || 60)))
+  const until = Date.now() + duration * 60_000
+  await setLocal(KEYS.postponedRoutine, { day: localDayKey(), until, source: 'user' })
+  await chrome.alarms.create(POSTPONED_ALARM, { when: until })
+  await setLastTabAction(`Routine postponed for ${duration} minutes`, true)
+}
+
+export async function cancelPostpone(): Promise<void> {
+  await chrome.storage.local.remove(KEYS.postponedRoutine)
+  await chrome.alarms.clear(POSTPONED_ALARM)
+}
+
+let postponedRunning = false
+export async function runPostponedIfDue(): Promise<void> {
+  if (postponedRunning) return
+  postponedRunning = true
+  try { await runPostponedOwned() } finally { postponedRunning = false }
+}
+
+async function runPostponedOwned(): Promise<void> {
+  const deferred = await getLocal<PostponedRoutine>(KEYS.postponedRoutine)
+  if (!deferred || !Number.isFinite(deferred.until)) return
+  if (deferred.until > Date.now()) {
+    await chrome.alarms.create(POSTPONED_ALARM, { when: deferred.until })
+    return
+  }
+  const settings = await getSettings()
+  if (deferred.source === 'startup' && !settings.startupEnabled) { await cancelPostpone(); return }
+  const state = await readRunState()
+  if (inQuietHours(settings) || state.batch || state.routine || state.activity) {
+    await chrome.alarms.create(POSTPONED_ALARM, { delayInMinutes: 5 })
+    return
+  }
+  const outcome = await runStartupSequence({ scheduled: true })
+  const current = await getLocal<PostponedRoutine>(KEYS.postponedRoutine)
+  if (current?.until !== deferred.until) return
+  if (outcome === 'ran' || outcome === 'already-today') await cancelPostpone()
+  else await chrome.alarms.create(POSTPONED_ALARM, { delayInMinutes: 5 })
+}
 // Every 5 minutes. Fine enough that a scheduled round starts within ~5 min of
 // its time in the worst case (worker was evicted, no punctual delivery), cheap
 // enough to be invisible. MV3's alarm floor is 30s; this is well clear of it.
@@ -98,6 +143,9 @@ export async function ensureScheduledRun(): Promise<void> {
 // a log row — the decision itself is identical for all three.
 export async function runScheduledIfDue(source: 'punctual' | 'heartbeat' | 'wake'): Promise<void> {
   const settings = await getSettings()
+  if (inQuietHours(settings)) return
+  const postponed = await getLocal<PostponedRoutine>(KEYS.postponedRoutine)
+  if (postponed && postponed.until > Date.now()) return
   const decision = scheduledDue({
     enabled: settings.scheduledRunEnabled,
     scheduledTime: settings.scheduledRunTime,

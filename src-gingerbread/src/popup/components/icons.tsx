@@ -44,6 +44,12 @@ export const ActivityIcon = (p: IconProps) => (
   </svg>
 )
 
+export const RewardsIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M8 3h8v6a4 4 0 0 1-8 0V3ZM8 5H5v3a3 3 0 0 0 3 3m8-6h3v3a3 3 0 0 1-3 3M12 13v7M8 21h8" />
+  </svg>
+)
+
 export const RefreshIcon = (p: IconProps) => (
   <svg {...base(p)}>
     <path d="M20 11a8 8 0 1 0-.9 4" />
@@ -57,24 +63,6 @@ export const GearIcon = (p: IconProps) => (
     <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5 5l2.1 2.1M16.9 16.9 19 19M19 5l-2.1 2.1M7.1 16.9 5 19" />
   </svg>
 )
-
-// The extension's own mark — the same cyan comet tile the toolbar icon shows
-// (scripts/make-icons-gingerbread.js, kept in sync by hand): an outlined rounded tile
-// with a comet head dashing right and three speed lines. Unlike the icons
-// above it paints its own colors (it's a brand, not a currentColor glyph), so
-// the topbar shows the extension itself beside the title instead of a blank
-// gradient square.
-export function CometMark({ size = 22, className }: { size?: number; className?: string }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" className={className} aria-hidden="true">
-      <rect x="1.1" y="1.1" width="21.8" height="21.8" rx="5.5" fill="#06b6d4" stroke="#0e7490" strokeWidth="1.7" />
-      <circle cx="16" cy="12" r="3.6" fill="#ffffff" />
-      <rect x="6" y="7.1" width="6.5" height="2.4" rx="1.2" fill="#ffffff" />
-      <rect x="2.6" y="10.8" width="9.5" height="2.4" rx="1.2" fill="#ffffff" />
-      <rect x="6" y="14.5" width="6.5" height="2.4" rx="1.2" fill="#ffffff" />
-    </svg>
-  )
-}
 
 export const CloseIcon = (p: IconProps) => (
   <svg {...base(p)}>
@@ -117,6 +105,16 @@ export const FlaskIcon = (p: IconProps) => (
   </svg>
 )
 
+// The Restart control (6.9.8): a clockwise circular arrow, deliberately the
+// mirror of RedoIcon above so the two never read as the same button — a
+// restart reloads the whole extension, a redo clears one day's done-mark.
+export const RestartIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+    <path d="M21 3v6h-6" />
+  </svg>
+)
+
 // The full-screen dashboard opener (always in the topbar): a dashboard panel
 // glyph — four unequal panes.
 export const LayoutDashboardIcon = (p: IconProps) => (
@@ -125,6 +123,15 @@ export const LayoutDashboardIcon = (p: IconProps) => (
     <rect x="13" y="3" width="8" height="6" rx="1.5" />
     <rect x="3" y="15" width="8" height="6" rx="1.5" />
     <rect x="13" y="11" width="8" height="10" rx="1.5" />
+  </svg>
+)
+
+export const WidgetEditIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <rect x="3" y="3" width="7" height="7" rx="1.5" />
+    <rect x="14" y="3" width="7" height="7" rx="1.5" />
+    <rect x="3" y="14" width="7" height="7" rx="1.5" />
+    <path d="m14 18 6-6 2 2-6 6-3 1 1-3Z" />
   </svg>
 )
 

@@ -1,0 +1,66 @@
+/* ---------- the charts ---------- */
+/* The wrap positions the min/max labels as HTML so the SVG can stretch to
+ * full width (preserveAspectRatio="none") without the text stretching with
+ * it — an SVG label would render ~2x wide on a wide screen. */
+.history-chart-wrap {
+  position: relative;
+  display: block;
+  width: 100%;
+  flex: 1;
+  min-height: 96px;
+}
+.history-chart {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.chart-grid {
+  stroke: var(--line-soft);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+  vector-effect: non-scaling-stroke;
+}
+.chart-bar {
+  /* Muted so the whole histogram doesn't shout; the last day is the full
+   * accent (the day you're on). */
+  fill: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.chart-bar--last {
+  fill: var(--accent);
+}
+.chart-label {
+  position: absolute;
+  left: 4px;
+  font-size: 9px;
+  font-weight: 550;
+  color: var(--text-faint);
+  pointer-events: none;
+  /* A chip, so the label stays readable where the line passes under it. */
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+.chart-label--max {
+  top: 1px;
+}
+.chart-label--min {
+  bottom: 1px;
+}
+.chart-dot {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.chart-empty,
+.dash-muted {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+.dash-goal {
+  margin-top: 14px;
+}

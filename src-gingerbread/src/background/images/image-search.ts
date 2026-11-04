@@ -8,6 +8,9 @@
 
 import { beginActivity, endActivity, currentStopEpoch } from '../core/run-state.ts'
 import { sleep } from '../core/delays.ts'
+import { holdKeepAlive, releaseKeepAlive } from '../core/keepalive.ts'
+import { withDeadline } from '../pure/search-recovery.ts'
+import { createNormalTab } from '../core/normal-tabs.ts'
 import { beginTabCapture, closeCapturedTabs, claimTab, waitForTabComplete } from '../core/tabs.ts'
 import { reportImageSearch } from '../core/log.ts'
 import { fetchRandomImageData } from './sources.ts'
@@ -19,17 +22,19 @@ import {
 
 const VISUAL_SEARCH_ATTEMPTS = 24
 const VISUAL_SEARCH_INTERVAL_MS = 500
+const INJECTION_TIMEOUT_MS = 10000
 
 export async function runRandomImageSearch(): Promise<void> {
   // Marks this run as the current activity so the popup's Stop button covers
   // it too; the returned epoch tells this run when it has been stopped.
   const myEpoch = await beginActivity('Image search')
   const stopped = (): Promise<boolean> => currentStopEpoch().then((v) => v !== myEpoch)
+  holdKeepAlive()
 
   try {
     await reportImageSearch('fetching a random image')
 
-    const imgData = await fetchRandomImageData()
+    const imgData = await withDeadline(fetchRandomImageData(), 30000, 'Image sources')
     if (!imgData.base64) {
       await reportImageSearch(`failed - every image source failed (${imgData.error})`, false)
       return
@@ -52,8 +57,10 @@ export async function runRandomImageSearch(): Promise<void> {
     } finally {
       await closeCapturedTabs('imageSearch', 'closeTabsAfterImageSearch')
     }
+  } catch (error) {
+    await reportImageSearch((await stopped()) ? 'stopped' : `failed - ${(error as Error).message}`, false)
   } finally {
-    await endActivity('Image search')
+    try { await endActivity('Image search') } finally { releaseKeepAlive() }
   }
 }
 
@@ -64,7 +71,7 @@ interface ImageData {
 
 // The caller passes its stopped() helper so a mid-poll stop is honored here.
 async function attachImageOnBing(imgData: ImageData, stopped: () => Promise<boolean>): Promise<void> {
-  const bingTab = await chrome.tabs.create({ url: 'https://www.bing.com/' })
+  const bingTab = await createNormalTab('https://www.bing.com/', true)
   const bingTabId = bingTab.id
   if (bingTabId == null) {
     await reportImageSearch('failed - could not open Bing tab', false)
@@ -74,14 +81,16 @@ async function attachImageOnBing(imgData: ImageData, stopped: () => Promise<bool
 
   const loaded = await waitForTabComplete(bingTabId)
   if (!loaded) console.warn('Image search: tab did not finish loading in time.')
+  if (await stopped()) return
 
   // Phase 1: press the camera icon in the top frame.
   let clicked: { ok: boolean; detail: string } | null | undefined = null
   try {
-    const [injection] = await chrome.scripting.executeScript({
+    const [injection] = await withDeadline(chrome.scripting.executeScript({
       target: { tabId: bingTabId, frameIds: [0] },
       func: clickVisualSearchButton,
-    })
+      args: [Date.now() + INJECTION_TIMEOUT_MS],
+    }), INJECTION_TIMEOUT_MS, 'Image camera injection')
     clicked = injection && injection.result
   } catch (e) {
     console.warn('Image search: camera click injection failed:', e)
@@ -103,7 +112,7 @@ async function attachImageOnBing(imgData: ImageData, stopped: () => Promise<bool
     // Stop checkpoint: attempt 1 follows the pre-capture check in the caller
     // closely enough, but the poll itself can run for ~12s — without this, a
     // stopped run would keep injecting until a frame accepts the image.
-    if (attempt > 1 && (await stopped())) {
+    if (await stopped()) {
       await reportImageSearch('stopped', false)
       return
     }
@@ -114,11 +123,11 @@ async function attachImageOnBing(imgData: ImageData, stopped: () => Promise<bool
 
     let probes: chrome.scripting.InjectionResult<{ candidate: boolean; hasFileInput: boolean }>[] = []
     try {
-      probes = await chrome.scripting.executeScript({
+      probes = await withDeadline(chrome.scripting.executeScript({
         target: { tabId: bingTabId, allFrames: true },
         func: probeVisualSearchTarget,
-        args: [allowFallbacks],
-      })
+        args: [allowFallbacks, Date.now() + INJECTION_TIMEOUT_MS],
+      }), INJECTION_TIMEOUT_MS, 'Image dialog probe')
     } catch (e) {
       console.warn('Image search: probe injection failed:', e)
       break
@@ -131,14 +140,15 @@ async function attachImageOnBing(imgData: ImageData, stopped: () => Promise<bool
       probes.find((r) => r && r.result && r.result.hasFileInput) ||
       probes.find((r) => r && r.result && r.result.candidate)
 
+    if (await stopped()) return
     if (candidate) {
       let results: chrome.scripting.InjectionResult<{ ok: boolean; detail: string }>[] = []
       try {
-        results = await chrome.scripting.executeScript({
+        results = await withDeadline(chrome.scripting.executeScript({
           target: { tabId: bingTabId, frameIds: [candidate.frameId] },
           func: attachRandomImageToVisualSearch,
-          args: [imgData.base64, imgData.mimeType, allowFallbacks],
-        })
+          args: [imgData.base64, imgData.mimeType, allowFallbacks, Date.now() + INJECTION_TIMEOUT_MS],
+        }), INJECTION_TIMEOUT_MS, 'Image upload injection')
       } catch (e) {
         console.warn('Image search: attach injection failed:', e)
         break

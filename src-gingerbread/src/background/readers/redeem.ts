@@ -1,8 +1,8 @@
 // Reads which Overwatch-coins digital codes the Rewards catalog currently
 // offers into lastRedeem: opens /redeem, drives the page's own search box
 // with REDEEM_QUERY, then reads the matching catalog cards' title, price and
-// stock state. On demand from the popup's Refresh button, and as the second
-// half of the routine's stats step. Ported from src-donut's readers/redeem.js
+// stock state. On demand from Refresh or the optional restock watcher, kept
+// separate from the daily routine's critical path. Ported from src-donut's readers/redeem.js
 // (2026-09-08) — the three phases, guards, stop checkpoints, and own-tab
 // close tail carry over; the ONE addition is the redeemHistory series the
 // full-screen dashboard charts (one entry per variant per read).
@@ -45,6 +45,8 @@ import {
   redeemOnDetailPage,
 } from '../injections/redeem-read.ts'
 import { READ_RUN_GUARDS } from './stats.ts'
+import { withDeadline } from '../pure/search-recovery.ts'
+import { createNormalTab } from '../core/normal-tabs.ts'
 
 // The catalog page the Overwatch-coins watch reads. The page's own search box
 // narrows it down to the digital-code cards; without one, the whole catalog is
@@ -64,11 +66,16 @@ const REDEEM_HYDRATION_MS = 12000
 // daily-ish reads across the three denominations.
 const REDEEM_HISTORY_CAP = 500
 
-export async function checkRedeemAvailability(): Promise<void> {
-  if (READ_RUN_GUARDS.redeem) {
-    console.log('Redeem watch: a read is already running; skipping.')
-    return
-  }
+let redeemInFlight: Promise<void> | null = null
+export function checkRedeemAvailability(): Promise<void> {
+  if (redeemInFlight) return redeemInFlight
+  const reading = collectRedeemAvailability()
+  redeemInFlight = reading.finally(() => { if (redeemInFlight === pending) redeemInFlight = null })
+  const pending = redeemInFlight
+  return pending
+}
+
+async function collectRedeemAvailability(): Promise<void> {
   READ_RUN_GUARDS.redeem = true
 
   // The run outlives the idle window (three page loads, three hydration
@@ -77,32 +84,65 @@ export async function checkRedeemAvailability(): Promise<void> {
 
   // Marks this run as the current activity so the popup's Stop button covers
   // it too; the returned epoch tells this run when it has been stopped.
-  const myEpoch = await beginActivity('Redeem watch')
-  const stopped = (): Promise<boolean> => currentStopEpoch().then((v) => v !== myEpoch)
+  const deadline = Date.now() + 100000
+  let myEpoch: number | null = null
+  const available = (maximum: number): number => {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw new Error('Catalog read deadline exceeded')
+    return Math.min(maximum, remaining)
+  }
+  const bounded = <T>(work: Promise<T>, maximum: number, label: string): Promise<T> =>
+    withDeadline(work, available(maximum), label)
+  const stopped = (): Promise<boolean> => myEpoch == null ? Promise.resolve(false)
+    : withDeadline(currentStopEpoch(), 2000, 'Catalog Stop check').then(v => v !== myEpoch)
+  const unavailable = async (): Promise<boolean> => Date.now() >= deadline || await stopped() || Date.now() >= deadline
+  const live = async (): Promise<void> => { if (await unavailable()) throw new Error('Catalog read stopped or expired') }
+  const readValue = <T>(key: string): Promise<T | undefined> => bounded(getLocal<T>(key), 5000, 'Catalog storage read')
+  const writeValue = async (key: string, value: unknown): Promise<void> => {
+    await live(); await bounded(setLocal(key, value), 5000, 'Catalog storage write')
+  }
+  const removeValue = async (key: string): Promise<void> => {
+    await live(); await bounded(removeLocal(key), 5000, 'Catalog storage removal')
+  }
+  const report = async (detail: string, ok: boolean | null, dump?: string): Promise<void> => {
+    await live(); await bounded(setLastRedeemLog(detail, ok, dump), 3000, 'Catalog log')
+  }
+  const executeCatalogScript = async <Args extends unknown[], Result>(injection: chrome.scripting.ScriptInjection<Args, Result>) => {
+    await live()
+    const reply = await bounded(chrome.scripting.executeScript(injection), REDEEM_HYDRATION_MS + 5000, 'Catalog page reader')
+    await live()
+    return reply
+  }
+  const loadPage = (tabId: number, maximum = 15000): Promise<boolean> =>
+    bounded(waitForTabComplete(tabId, available(maximum)), maximum, 'Catalog page load')
+  const settle = (ms: number): Promise<void> => bounded(sleep(Math.min(ms, available(ms))), ms, 'Catalog navigation settle')
+  const navigateTab = async (tabId: number, properties: chrome.tabs.UpdateProperties): Promise<chrome.tabs.Tab | undefined> => {
+    await live(); return bounded(chrome.tabs.update(tabId, properties), 10000, 'Catalog navigation')
+  }
 
   // The only tab this run owns (closed in the finally). Kept in a variable
   // the finally can see even if the create throws.
   let redeemTabId: number | null = null
 
   try {
-    // Background tab, same reasoning as refreshStats' readPage: the redeem
-    // read must not steal focus from an open popup.
-    const redeemTab = await chrome.tabs.create({ url: REDEEM_URL, pinned: false, active: false })
+    myEpoch = await bounded(beginActivity('Redeem watch'), 5000, 'Catalog start')
+    // Select a normal tab for hydration without requesting OS-window focus.
+    const redeemTab = await bounded(createNormalTab(REDEEM_URL), 10000, 'Catalog tab opening')
     redeemTabId = redeemTab.id ?? null
 
     // A stop that landed while the tab was opening. Stopping is not finishing:
     // the tab stays open and the injections never run.
-    if (await stopped()) {
+    if (await unavailable()) {
       console.log('Redeem watch: stopped while opening the redeem tab.')
       return
     }
 
-    const loaded = await waitForTabComplete(redeemTab.id!, 15000)
+    const loaded = await loadPage(redeemTab.id!, 15000)
     if (!loaded) console.warn('Redeem watch: page did not finish loading in time.')
 
     // Stop checkpoint after the load wait: the injections are the part a stop
     // is meant to prevent.
-    if (await stopped()) {
+    if (await unavailable()) {
       console.log('Redeem watch: stopped before the search could run.')
       return
     }
@@ -112,7 +152,7 @@ export async function checkRedeemAvailability(): Promise<void> {
     // means the page navigated mid-script (the search trigger does a full
     // navigation), which the load wait below absorbs the same way.
     try {
-      const [injection] = await chrome.scripting.executeScript({
+      const [injection] = await executeCatalogScript({
         target: { tabId: redeemTab.id! },
         func: searchRedeemFor,
         args: [REDEEM_QUERY, REDEEM_HYDRATION_MS],
@@ -124,22 +164,22 @@ export async function checkRedeemAvailability(): Promise<void> {
       console.warn('Redeem search injection ended early:', e)
     }
 
-    if (await stopped()) {
+    if (await unavailable()) {
       console.log('Redeem watch: stopped before the reader could run.')
       return
     }
 
     // Let a search-triggered navigation start before waiting it out; a
     // same-document re-render just costs this settle.
-    await sleep(1500)
-    const resultsLoaded = await waitForTabComplete(redeemTab.id!, 15000)
+    await settle(1500)
+    const resultsLoaded = await loadPage(redeemTab.id!, 15000)
     if (!resultsLoaded) {
       console.warn('Redeem watch: results page did not finish loading in time.')
     }
 
     // Stop checkpoint after the results load: the reader is the part a stop is
     // meant to prevent.
-    if (await stopped()) {
+    if (await unavailable()) {
       console.log('Redeem watch: stopped before the reader could run.')
       return
     }
@@ -150,7 +190,7 @@ export async function checkRedeemAvailability(): Promise<void> {
     let options: RedeemOption[] | null = null
     let optionsDump = ''
     try {
-      const [injection] = await chrome.scripting.executeScript({
+      const [injection] = await executeCatalogScript({
         target: { tabId: redeemTab.id! },
         func: readRedeemOptions,
         args: [REDEEM_QUERY, REDEEM_HYDRATION_MS],
@@ -166,8 +206,8 @@ export async function checkRedeemAvailability(): Promise<void> {
       // URL from the previous read ride along for the same reason: phase 3
       // replaces them only when it actually reads a new list.
       if (Array.isArray(options) && options.length) {
-        const prev = (await getLocal<RedeemRead>(KEYS.lastRedeem)) || { variants: [], variantUrl: '' }
-        await setLocal(KEYS.lastRedeem, {
+        const prev = (await readValue<RedeemRead>(KEYS.lastRedeem)) || { variants: [], variantUrl: '' }
+        await writeValue(KEYS.lastRedeem, {
           at: Date.now(),
           query: REDEEM_QUERY,
           options,
@@ -177,11 +217,11 @@ export async function checkRedeemAvailability(): Promise<void> {
         console.log(`Redeem watch: read ${options.length} option(s).`)
       } else {
         console.warn('Redeem watch: no Overwatch cards found; keeping the last read.')
-        await setLastRedeemLog('No Overwatch cards in the catalog — kept the last read.', false, optionsDump)
+        await report('No Overwatch cards in the catalog — kept the last read.', false, optionsDump)
       }
     } catch (e) {
       console.warn('Redeem read injection ended early:', e)
-      await setLastRedeemLog(`The catalog read failed early: ${e instanceof Error ? e.message : String(e)}`, false)
+      await report(`The catalog read failed early: ${e instanceof Error ? e.message : String(e)}`, false)
     }
 
     // Phase 3 — the detail page: the tile's destination, where the variant
@@ -208,9 +248,9 @@ export async function checkRedeemAvailability(): Promise<void> {
     if (target) {
       try {
         const detailUrl = new URL(target.href!, REDEEM_URL).toString()
-        await chrome.tabs.update(redeemTab.id!, { url: detailUrl })
+        await navigateTab(redeemTab.id!, { url: detailUrl })
 
-        if (await stopped()) {
+        if (await unavailable()) {
           console.log('Redeem watch: stopped before the detail page could be read.')
           return
         }
@@ -218,18 +258,18 @@ export async function checkRedeemAvailability(): Promise<void> {
         // Same settle-then-wait as between the search and the catalog read:
         // tabs.update resolves before the navigation starts, so an immediate
         // waitForTabComplete could see the OLD page still "complete".
-        await sleep(1500)
-        const detailLoaded = await waitForTabComplete(redeemTab.id!, 15000)
+        await settle(1500)
+        const detailLoaded = await loadPage(redeemTab.id!, 15000)
         if (!detailLoaded) {
           console.warn('Redeem watch: detail page did not finish loading in time.')
         }
 
-        if (await stopped()) {
+        if (await unavailable()) {
           console.log('Redeem watch: stopped before the variants reader could run.')
           return
         }
 
-        const [injection] = await chrome.scripting.executeScript({
+        const [injection] = await executeCatalogScript({
           target: { tabId: redeemTab.id! },
           func: readRedeemVariants,
           args: [REDEEM_HYDRATION_MS],
@@ -241,25 +281,25 @@ export async function checkRedeemAvailability(): Promise<void> {
         // more likely a markup surprise than a product with no variants, so
         // it keeps the previous read (and the dump tells us why).
         if (Array.isArray(variants) && variants.length) {
-          const record = await getLocal<RedeemRead>(KEYS.lastRedeem)
+          const record = await readValue<RedeemRead>(KEYS.lastRedeem)
           if (record) {
             // Stock-change news: the pure diff in pure/redeem-news.ts (extracted
             // from src-donut's inline logic so it is unit-tested).
             const diff = diffStock(
               record.variants || [],
               variants,
-              (await getLocal(KEYS.redeemRestockNews)) || null,
-              (await getLocal(KEYS.redeemSoldOutNews)) || null,
+              (await readValue(KEYS.redeemRestockNews)) || null,
+              (await readValue(KEYS.redeemSoldOutNews)) || null,
             )
             if (diff.restockNews) {
-              await setLocal(KEYS.redeemRestockNews, diff.restockNews)
+              await writeValue(KEYS.redeemRestockNews, diff.restockNews)
             } else {
-              await removeLocal(KEYS.redeemRestockNews)
+              await removeValue(KEYS.redeemRestockNews)
             }
             if (diff.soldOutNews) {
-              await setLocal(KEYS.redeemSoldOutNews, diff.soldOutNews)
+              await writeValue(KEYS.redeemSoldOutNews, diff.soldOutNews)
             } else {
-              await removeLocal(KEYS.redeemSoldOutNews)
+              await removeValue(KEYS.redeemSoldOutNews)
             }
             if (diff.restocked.length) {
               console.log(`Redeem watch: restocked — ${diff.restocked.join(', ')}.`)
@@ -270,18 +310,18 @@ export async function checkRedeemAvailability(): Promise<void> {
 
             // The dashboard's series: one entry per variant per read (the one
             // capability src-donut never had). Appended then trimmed oldest-first.
-            await appendRedeemHistory(variants)
+            await live(); await bounded(appendRedeemHistory(variants, live), 5000, 'Catalog history write')
 
-            await setLocal(KEYS.lastRedeem, { ...record, variants, variantUrl: detailUrl })
+            await writeValue(KEYS.lastRedeem, { ...record, variants, variantUrl: detailUrl })
             console.log(`Redeem watch: read ${variants.length} variant(s) on the detail page.`)
-            await setLastRedeemLog(
+            await report(
               `Read ${options?.length ?? 0} option(s) and ${variants.length} amount(s).`,
               true,
             )
           }
         } else {
           console.warn('Redeem watch: no variants found on the detail page; keeping the last read.')
-          await setLastRedeemLog(
+          await report(
             'The product page showed no coin amounts — kept the last read.',
             false,
             (read && read.dump) || '',
@@ -289,28 +329,33 @@ export async function checkRedeemAvailability(): Promise<void> {
         }
       } catch (e) {
         console.warn('Redeem variants injection ended early:', e)
-        await setLastRedeemLog(`The amounts read failed early: ${e instanceof Error ? e.message : String(e)}`, false)
+        await report(`The amounts read failed early: ${e instanceof Error ? e.message : String(e)}`, false)
       }
     }
+  } catch (error) {
+    console.warn('Redeem watch: read stopped or failed:', error)
   } finally {
     // Closes only the tab THIS run opened. A stopped run still leaves its
     // tab open: stopping is not finishing.
-    if (redeemTabId != null && !(await stopped())) {
-      const settings = await getSettings()
-      const closed = await closeTabs([redeemTabId], settings.keepPinnedTabs)
-      if (closed) console.log('Closed the tab opened by "redeem".')
+    try {
+      if (redeemTabId != null && !(await stopped())) {
+        const settings = await withDeadline(getSettings(), 2000, 'Catalog cleanup settings')
+        const closed = await withDeadline(closeTabs([redeemTabId], settings.keepPinnedTabs, myEpoch ?? undefined), 5000, 'Catalog tab cleanup')
+        if (closed) console.log('Closed the tab opened by "redeem".')
+      }
+    } catch (error) { console.warn('Catalog cleanup failed:', error) }
+    finally {
+      await withDeadline(endActivity('Redeem watch'), 2000, 'Catalog activity cleanup').catch(console.warn)
+      READ_RUN_GUARDS.redeem = false
+      releaseKeepAlive()
     }
-
-    await endActivity('Redeem watch')
-    READ_RUN_GUARDS.redeem = false
-    releaseKeepAlive()
   }
 }
 
 // Appends this read's per-variant availability to the redeemHistory series
 // and trims it to the cap. The day key collapses same-day re-reads for the
 // dashboard's grouping without dropping the finer timestamps (`at`).
-async function appendRedeemHistory(variants: RedeemVariant[]): Promise<void> {
+async function appendRedeemHistory(variants: RedeemVariant[], beforeWrite?: () => Promise<void>): Promise<void> {
   const now = Date.now()
   const day = localDayKey()
   const entries: RedeemHistoryEntry[] = variants.map((variant) => ({
@@ -322,6 +367,7 @@ async function appendRedeemHistory(variants: RedeemVariant[]): Promise<void> {
 
   const history = (await getLocal<RedeemHistoryEntry[]>(KEYS.redeemHistory)) || []
   const next = [...history, ...entries].slice(-REDEEM_HISTORY_CAP)
+  await beforeWrite?.()
   await setLocal(KEYS.redeemHistory, next)
 }
 

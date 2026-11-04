@@ -15,9 +15,27 @@ export function openRewardsSectionTiles(
   names: string[],
   maxOpen: number,
   label: string,
-  skipSpent: boolean
+  skipSpent: boolean,
+  lease?: { stopEpoch: number; expiresAt: number }
 ): Promise<number> {
   return new Promise(resolve => {
+    let settled = false;
+    const expiresAt = Math.min(lease?.expiresAt || Date.now() + 40000, Date.now() + 40000);
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(expiry);
+      resolve(value);
+    };
+    const expiry = setTimeout(() => finish(-1), Math.max(0, expiresAt - Date.now()));
+    const allowed = async () => {
+      if (settled || Date.now() >= expiresAt) return false;
+      if (!lease) return true;
+      try {
+        const { runState } = await chrome.storage.local.get('runState');
+        return !settled && Date.now() < expiresAt && runState?.stopEpoch === lease.stopEpoch;
+      } catch { return false; }
+    };
     const MAX_RETRIES = 20;
     const RETRY_INTERVAL_MS = 500;
     const CLICK_DELAY_MS = 800;
@@ -49,10 +67,10 @@ export function openRewardsSectionTiles(
     function scheduleRetry(reason) {
       console.warn(reason);
       if (attempts < MAX_RETRIES) {
-        setTimeout(tryFindAndClick, RETRY_INTERVAL_MS);
+        setTimeout(() => { void tryFindAndClick().catch(() => finish(-1)); }, RETRY_INTERVAL_MS);
       } else {
         console.warn(`${label}: giving up after retries.`);
-        resolve(0);
+        finish(0);
       }
     }
 
@@ -128,7 +146,8 @@ export function openRewardsSectionTiles(
       return true;
     }
 
-    function tryFindAndClick() {
+    async function tryFindAndClick() {
+      if (!(await allowed())) { finish(-1); return; }
       attempts++;
 
       const heading = findHeading();
@@ -200,7 +219,7 @@ export function openRewardsSectionTiles(
           console.warn(
             `${label}: ${candidates.length} candidates, none usable (completed or disabled).`
           );
-          resolve(0);
+          finish(0);
           return;
         }
         scheduleRetry(`${label}: no tiles in the section yet, retrying...`);
@@ -222,7 +241,7 @@ export function openRewardsSectionTiles(
         console.warn(
           `${label}: ${tiles.length} tiles, all spent (completed or reward up only) — nothing to open.`
         );
-        resolve(0);
+        finish(0);
         return;
       }
 
@@ -237,21 +256,23 @@ export function openRewardsSectionTiles(
       }
       console.log(`${label}: clicking ${toClick.length} of ${tiles.length} tiles.`);
 
+      let opened = 0;
       toClick.forEach((el, idx) => {
-        setTimeout(() => {
-          if (el && typeof el.click === "function") {
-            el.click();
-          }
+        setTimeout(async () => {
+          if (!(await allowed())) { finish(-1); return; }
+          try {
+            if (el && typeof el.click === "function") { el.click(); opened++; }
+          } catch { finish(-1); }
         }, idx * CLICK_DELAY_MS);
       });
 
       setTimeout(
-        () => resolve(toClick.length),
+        () => finish(opened),
         toClick.length * CLICK_DELAY_MS + 500
       );
     }
 
-    tryFindAndClick();
+    void tryFindAndClick().catch(() => finish(-1));
   });
 }
 
@@ -281,8 +302,26 @@ export function openRewardsSectionTiles(
 // The failed and unknown outcomes also carry `dump` — the markup the branch
 // was staring at — which reportClaimResult forwards into the Activity row
 // (the same contract as the redeem watch and the stats read).
-export function claimDashboardPoints(timeoutMs: number) {
+export function claimDashboardPoints(timeoutMs: number, lease?: { stopEpoch: number; expiresAt: number }) {
   return new Promise(resolve => {
+    let settled = false;
+    const expiresAt = Math.min(lease?.expiresAt || Date.now() + 40000, Date.now() + 40000);
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(expiry);
+      resolve(value);
+    };
+    const expiry = setTimeout(() => finish({ outcome: "unknown", reason: "claim deadline expired" }), Math.max(0, expiresAt - Date.now()));
+    const cancelled = () => finish({ outcome: "cancelled", reason: "stopped or expired" });
+    const allowed = async () => {
+      if (settled || Date.now() >= expiresAt) return false;
+      if (!lease) return true;
+      try {
+        const { runState } = await chrome.storage.local.get('runState');
+        return !settled && Date.now() < expiresAt && runState?.stopEpoch === lease.stopEpoch;
+      } catch { return false; }
+    };
     const TILE_POLL_ATTEMPTS = 20;  // ~10s for the dashboard to hydrate — the
                                     // stats reader waits 12s for the same
                                     // reason, and a slow tile render would
@@ -298,7 +337,10 @@ export function claimDashboardPoints(timeoutMs: number) {
       (el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
 
     function after(ms, fn) {
-      setTimeout(fn, ms);
+      setTimeout(async () => {
+        if (!(await allowed())) { cancelled(); return; }
+        try { await fn(); } catch (e) { finish({ outcome: "failed", reason: String(e?.message || e) }); }
+      }, ms);
     }
 
     // Press the way a real mouse does (the stats read's pressButton, copied
@@ -314,7 +356,8 @@ export function claimDashboardPoints(timeoutMs: number) {
     // virtually pressed, the page ignored it, no verdict ever rendered. The
     // trailing click keeps click-only handlers (every static fixture)
     // working, and inside usePress the whole sequence is exactly one press.
-    function click(el) {
+    async function click(el) {
+      if (!(await allowed())) { cancelled(); return false; }
       if (!el || typeof el.click !== "function") return;
       const rect = el.getBoundingClientRect();
       const at = {
@@ -350,6 +393,7 @@ export function claimDashboardPoints(timeoutMs: number) {
         );
       }
       el.click();
+      return true;
     }
 
     // The tile is a <button>; the sibling "Available points" tile is an <a>
@@ -442,26 +486,24 @@ export function claimDashboardPoints(timeoutMs: number) {
     function waitForTile(attempt) {
       const tile = findTile();
       if (tile) {
-        openPanel(tile);
-        return;
+        return openPanel(tile);
       }
       if (attempt < TILE_POLL_ATTEMPTS) {
         after(POLL_INTERVAL_MS, () => waitForTile(attempt + 1));
       } else {
         console.warn("Claim: no 'Ready to claim' tile on the page.");
-        resolve({ outcome: "nothing" });
+        finish({ outcome: "nothing" });
       }
     }
 
     // Step 2: the panel. It may already be open when we arrive, in which case
     // the tile is left unclicked.
-    function openPanel(tile) {
+    async function openPanel(tile) {
       const dialog = findDialog(tile);
       if (dialog) {
-        waitForClaimButton(dialog, 0);
-        return;
+        return waitForClaimButton(dialog, 0);
       }
-      click(tile);
+      if (!(await click(tile))) return;
       waitForPanel(0);
     }
 
@@ -471,20 +513,19 @@ export function claimDashboardPoints(timeoutMs: number) {
     // collapsed AND no dialog is open at all. Both guards matter: a click
     // that landed flips the tile's aria-expanded, and re-clicking into an
     // opening panel would toggle it shut again.
-    function waitForPanel(waitedMs) {
+    async function waitForPanel(waitedMs) {
       // Re-query each time: react-aria re-renders can replace the node.
       const tile = findTile();
       const dialog = findDialog(tile);
       if (dialog) {
-        waitForClaimButton(dialog, 0);
-        return;
+        return waitForClaimButton(dialog, 0);
       }
       if (waitedMs < PANEL_WAIT_MS) {
         const pageShowsNothingOpen =
           !document.querySelector('[role="dialog"]') &&
           (!tile || tile.getAttribute("aria-expanded") !== "true");
         if (tile && waitedMs > 0 && waitedMs % 1500 === 0 && pageShowsNothingOpen) {
-          click(tile);
+          if (!(await click(tile))) return;
         }
         after(POLL_INTERVAL_MS, () => waitForPanel(waitedMs + POLL_INTERVAL_MS));
       } else {
@@ -511,7 +552,7 @@ export function claimDashboardPoints(timeoutMs: number) {
           parts.push("dialog: " + anyDialog.outerHTML.slice(0, 1500));
         }
         console.warn("Claim: the claim panel did not open.");
-        resolve({
+        finish({
           outcome: "failed",
           reason: "panel did not open",
           dump: parts.join(" ")
@@ -523,14 +564,13 @@ export function claimDashboardPoints(timeoutMs: number) {
     function waitForClaimButton(dialog, attempt) {
       const button = findClaimButton(dialog);
       if (button && !isDisabled(button)) {
-        claimIt(dialog, button);
-        return;
+        return claimIt(dialog, button);
       }
 
       // A panel with nothing pending says so in words rather than offering a
       // card, and a disabled card that never recovers is the same verdict.
       if (textOf(dialog).includes("no points to claim")) {
-        resolve({ outcome: "nothing" });
+        finish({ outcome: "nothing" });
         return;
       }
 
@@ -542,7 +582,7 @@ export function claimDashboardPoints(timeoutMs: number) {
           dialog.outerHTML.slice(0, 1500)
         );
         console.warn("Claim: claim card not found in the panel.");
-        resolve({
+        finish({
           outcome: "failed",
           reason: "claim button not found",
           dump: dialog.outerHTML.slice(0, 1500)
@@ -551,9 +591,9 @@ export function claimDashboardPoints(timeoutMs: number) {
     }
 
     // Steps 4+5: capture the points, click once, poll for the verdict.
-    function claimIt(dialog, button) {
+    async function claimIt(dialog, button) {
       const points = pointsIn(button);
-      click(button);
+      if (!(await click(button))) return;
       waitForOutcome(dialog, points);
     }
 
@@ -582,15 +622,15 @@ export function claimDashboardPoints(timeoutMs: number) {
         panel.includes("successfully claimed") ||
         page.includes("successfully claimed")
       ) {
-        resolve({ outcome: "claimed", points });
+        finish({ outcome: "claimed", points });
         return;
       }
       if (panel.includes("no points to claim") || page.includes("no points to claim")) {
-        resolve({ outcome: "nothing" });
+        finish({ outcome: "nothing" });
         return;
       }
       if (panel.includes("error claiming") || page.includes("error claiming")) {
-        resolve({
+        finish({
           outcome: "failed",
           reason: "error message shown",
           dump: (live || document.body).outerHTML.slice(0, 1500)
@@ -603,7 +643,7 @@ export function claimDashboardPoints(timeoutMs: number) {
         // points are pending, so tile and panel both gone is the page's
         // own "done": the claim went through.
         if (!tile) {
-          resolve({ outcome: "claimed", points });
+          finish({ outcome: "claimed", points });
           return;
         }
         // The panel shut but the tile still offers points: keep waiting — a
@@ -621,17 +661,17 @@ export function claimDashboardPoints(timeoutMs: number) {
           : "page: " + page.slice(0, 1500);
         console.warn("Claim: panel markup at timeout (report to dev):", dump);
         console.warn("Claim: timed out waiting for the outcome.");
-        resolve({ outcome: "unknown", points, dump });
+        finish({ outcome: "unknown", points, dump });
         return;
       }
       after(POLL_INTERVAL_MS, () => waitForOutcome(live || dialog, points));
     }
 
     try {
-      waitForTile(0);
+      after(0, () => waitForTile(0));
     } catch (e) {
       // Never throw to the caller: an unreadable page reports failure instead.
-      resolve({ outcome: "failed", reason: String((e && e.message) || e) });
+      finish({ outcome: "failed", reason: String((e && e.message) || e) });
     }
   });
 }

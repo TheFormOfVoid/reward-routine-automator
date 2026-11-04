@@ -7,6 +7,8 @@
 import { localDayKey } from '../core/day.ts'
 import { getSettings } from '../../shared/settings.ts'
 import { slotMissingDefaults } from '../pure/orders.ts'
+import { QUERY_SOURCE_LABELS, DEFAULT_QUERY_SOURCE_ORDER } from './metadata.ts'
+export { DEFAULT_QUERY_SOURCE_ORDER } from './metadata.ts'
 
 export interface QueryResult {
   query: string
@@ -101,12 +103,50 @@ export function trimQuery(text: string | null | undefined): string {
 
 export async function fetchWithTimeout(url: string, timeoutMs = 6000): Promise<Response> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  let timer: ReturnType<typeof setTimeout>
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(new Error('Response deadline exceeded')) }, timeoutMs)
+  })
   try {
-    return await fetch(url, { signal: controller.signal })
+    // fetch() resolves at headers. Buffering while the abort/deadline is still
+    // armed covers a body that stalls forever after an otherwise quick reply.
+    // Every caller consumes the body exactly once; image callers retain blob's
+    // content type and query callers retain json/text behavior.
+    return await Promise.race([deadline, (async () => {
+      const response = await fetch(url, { signal: controller.signal })
+      const body = await response.arrayBuffer()
+      if (body.byteLength > 10 * 1024 * 1024) throw new Error('Response is too large')
+      const buffered = new Response([204, 205, 304].includes(response.status) ? null : body,
+        { status: response.status, statusText: response.statusText, headers: response.headers })
+      Object.defineProperty(buffered, 'url', { value: response.url })
+      return buffered
+    })()])
   } finally {
-    clearTimeout(timer)
+    clearTimeout(timer!)
   }
+}
+
+// RSS title extraction is intentionally DOM-free: extension workers do not
+// expose DOMParser. We accept only literal item/title content and XML's five
+// predefined/numeric entities; declarations/custom entities are never expanded.
+export function parseTrendTitles(xml: string): string[] {
+  if (xml.length > 2 * 1024 * 1024 || /<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error('Unsupported RSS document')
+  const decode = (text: string): string => text.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (all, name: string) => {
+    if (name[0] === '#') {
+      const value = name[1]?.toLowerCase() === 'x' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10)
+      return value > 0 && value <= 0x10ffff && !(value >= 0xd800 && value <= 0xdfff) ? String.fromCodePoint(value) : ''
+    }
+    return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[name.toLowerCase()] || all
+  })
+  const titles: string[] = []
+  for (const item of xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item\s*>/gi)) {
+    const title = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(item[1])?.[1]
+    if (!title) continue
+    const cdata = /^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/.exec(title)
+    const value = trimQuery(cdata ? cdata[1] : decode(title.replace(/<[^>]*>/g, '')))
+    if (value) titles.push(value)
+  }
+  return [...new Set(titles)]
 }
 
 async function fetchBingAutosuggestQuery(): Promise<QueryResult> {
@@ -147,16 +187,12 @@ async function fetchGoogleTrendsQuery(): Promise<QueryResult> {
       geos.map(async (geo) => {
         const res = await fetchWithTimeout(`https://trends.google.com/trending/rss?geo=${geo}`)
         if (!res.ok) throw new Error(`HTTP ${res.status} for geo ${geo}`)
-        return new DOMParser().parseFromString(await res.text(), 'application/xml')
+        return parseTrendTitles(await res.text())
       }),
     )
 
     titles = []
-    for (const doc of docs) {
-      for (const item of doc.querySelectorAll('item > title')) {
-        titles.push(trimQuery(item.textContent))
-      }
-    }
+    for (const doc of docs) titles.push(...doc)
 
     titles = [...new Set(titles.filter(Boolean))]
     if (!titles.length) throw new Error('no trending titles')
@@ -201,14 +237,14 @@ async function generateLocalFallbackQuery(): Promise<QueryResult> {
 // The query sources, keyed by the ids stored in settings.querySourceOrder. The
 // popup mirrors these ids in each row's data-source attribute.
 export const QUERY_SOURCES: Record<string, QuerySource> = {
-  bingAutosuggest: { name: 'Bing autosuggest', get: fetchBingAutosuggestQuery },
-  googleTrends: { name: 'Google Trends', get: fetchGoogleTrendsQuery },
-  wikipedia: { name: 'Wikipedia', get: fetchWikipediaQuery },
-  uselessFacts: { name: 'UselessFacts', get: fetchUselessFactsQuery },
-  local: { name: 'local-fallback', get: generateLocalFallbackQuery },
+  bingAutosuggest: { ...QUERY_SOURCE_LABELS.bingAutosuggest, get: fetchBingAutosuggestQuery },
+  googleTrends: { ...QUERY_SOURCE_LABELS.googleTrends, get: fetchGoogleTrendsQuery },
+  wikipedia: { ...QUERY_SOURCE_LABELS.wikipedia, get: fetchWikipediaQuery },
+  uselessFacts: { ...QUERY_SOURCE_LABELS.uselessFacts, get: fetchUselessFactsQuery },
+  local: { ...QUERY_SOURCE_LABELS.local, get: generateLocalFallbackQuery },
 }
 
-export const DEFAULT_QUERY_SOURCE_ORDER = Object.keys(QUERY_SOURCES)
+const providerCooldown = new Map<string, { failures: number; until: number }>()
 
 // Same tolerance as the startup order: unknown ids and duplicates go, and
 // anything missing is slotted into its default position. Mirrored in the popup.
@@ -222,11 +258,14 @@ export async function generateMeaningfulQuery(): Promise<QueryResult> {
   for (const id of normalizeQuerySourceOrder(settings.querySourceOrder)) {
     const source = QUERY_SOURCES[id]
     if (!source) continue
+    if ((providerCooldown.get(id)?.until || 0) > Date.now()) continue
     try {
       const result = await source.get()
-      if (result && result.query) return result
-      console.warn(`Query source ${source.name} returned nothing usable.`)
+      if (result && result.query) { providerCooldown.delete(id); return result }
+      throw new Error('Provider returned no usable query')
     } catch (e) {
+      const failures = (providerCooldown.get(id)?.failures || 0) + 1
+      providerCooldown.set(id, { failures, until: Date.now() + Math.min(5 * 60_000, 30_000 * 2 ** Math.min(failures - 1, 4)) })
       console.warn(`Query source ${source.name} failed:`, e)
     }
   }
