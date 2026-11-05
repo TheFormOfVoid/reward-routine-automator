@@ -264,3 +264,75 @@ The updater preserves its own folder while running. Replace the `updater` folder
 The other four builds update the old way: unzip the new release over the folder and
 click Reload at `chrome://extensions`. Design in
 [ADR-024](docs/architecture/adr-024-one-click-updater.md).
+
+## Run it in Docker, once a day
+
+`docker/` runs the Gingerbread build unattended. A real Chromium window runs on
+a virtual screen, and a small Node controller (no npm dependencies) does the
+following:
+
+- It starts the routine once a day at a time you set, then closes the browser.
+- It checks the Microsoft sign-in before each run. When you are signed out,
+  it stops with a clear "sign-in needed" message instead of searching while
+  signed out.
+- It follows the extension's own run record until the run ends. It retries
+  failed or incomplete runs and logs each step, with points before and after.
+- It serves a small web UI with the status, recent runs, the log, **Run now**,
+  and the browser screen (noVNC) for signing in.
+
+The controller turns off the extension's own triggers: the start-up run, the
+built-in schedule, the confirm prompt and the all-day background searches. The
+routine then runs once a day and only then.
+
+### Start it (docker compose)
+
+```sh
+cp .env.example .env        # set TZ, RUN_TIME and WEB_PASSWORD
+docker compose up -d --build
+```
+
+Then sign in once:
+
+1. Open <http://localhost:8099>.
+2. Press **Open browser for sign-in** and sign in to Microsoft on the screen
+   that appears.
+3. Press **Close browser**, then **Check sign-in**.
+
+The profile, state and logs live in `./data`.
+
+- `docker compose exec rewards rewards run` starts a run now and follows it.
+- `docker compose exec rewards rewards status` shows the next run and recent
+  results.
+
+The UI port is bound to localhost. Before you publish it to your network, set
+`WEB_PASSWORD`. Anyone who reaches the screen can use your Microsoft account.
+
+### Change the daily time
+
+Set `RUN_TIME` (24-hour `HH:MM`) and `TZ` in `.env`, then run
+`docker compose up -d`. `RUN_JITTER_MIN` spreads the start over that many
+minutes after `RUN_TIME`. When the container starts after today's time and
+today has not run, it catches up within a couple of minutes; set `CATCH_UP`
+to `false` to turn that off.
+
+### Home Assistant OS
+
+`ha-addon/` is the same container as a local add-on. Its web UI sits in the
+sidebar through ingress, so no port is published.
+
+```sh
+node docker/make-ha-addon.mjs \homeassistant.local\addons\reward_routine
+```
+
+1. Run the command above.
+2. In Home Assistant, open **Settings → Add-ons → Add-on store → ⋮ → Check for
+   updates**.
+3. Install **Reward Routine** from *Local add-ons*. The first build takes a
+   while on a Raspberry Pi.
+4. Start it and open **Rewards** in the sidebar to sign in.
+
+The daily time is on the add-on's Configuration tab and uses Home Assistant's
+timezone unless you set one there. `ha-addon/DOCS.md` has the details.
+
+Automating Microsoft Rewards is against Microsoft's Rewards terms. Microsoft
+can suspend the Rewards account and void its points.

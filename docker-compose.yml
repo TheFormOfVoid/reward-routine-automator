@@ -1,0 +1,22 @@
+services:
+  rewards:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: reward-routine:local
+    container_name: reward-routine
+    env_file: .env
+    volumes:
+      # Browser profile (your Microsoft sign-in), state and logs.
+      - ./data:/data
+    ports:
+      # Web UI + browser screen. Bound to localhost only; see README before
+      # opening it to your network.
+      - "127.0.0.1:8099:8099"
+    shm_size: 1gb
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,28 @@
+configuration:
+  run_time:
+    name: Daily run time
+    description: 24-hour HH:MM, in Home Assistant's timezone unless you set one below.
+  timezone:
+    name: Timezone
+    description: Optional IANA name such as Asia/Riyadh. Leave empty to use Home Assistant's.
+  jitter_minutes:
+    name: Start window (minutes)
+    description: Start at a random point up to this many minutes after the daily time. 0 starts on time.
+  timeout_minutes:
+    name: Run timeout (minutes)
+    description: Stop a run that has not finished after this long.
+  max_attempts:
+    name: Attempts per day
+    description: How many times to try when a run fails or ends incomplete.
+  retry_delay_minutes:
+    name: Retry delay (minutes)
+    description: Wait before retry N is this times N.
+  catch_up:
+    name: Catch up missed runs
+    description: If the add-on starts after today's time and today has not run, run soon.
+  notify_url:
+    name: Notification URL
+    description: Optional. An ntfy topic URL gets a push; any other URL gets a JSON POST. Sent on failures and when a sign-in is needed.
+  notify_on_success:
+    name: Notify on success
+    description: Also notify after each successful run.

@@ -53,3 +53,9 @@ src-gingerbread/dist/
 # --- deepseek-harness is a separate, unrelated project that happens to sit
 # in this working tree; it must never be committed here ---
 deepseek-harness/
+
+# --- Docker / Home Assistant add-on: secrets and runtime data stay local,
+# but the docker/ tree (its ui.html included) is source ---
+.env
+data/
+!docker/**

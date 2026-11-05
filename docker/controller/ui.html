@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reward Routine</title>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --fg: #1d2330; --muted: #667085; --line: #e4e7ec; --accent: #6d4aff; --ok: #12805c; --bad: #c4320a; --warn: #b54708; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111318; --card: #1a1d24; --fg: #e6e8ee; --muted: #98a2b3; --line: #2a2f3a; --accent: #9b87ff; --ok: #3ccb8f; --bad: #ff7a59; --warn: #fdb022; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg); }
+  main { max-width: 980px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  h1 { font-size: 18px; margin: 0; }
+  h2 { font-size: 14px; margin: 0 0 8px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+  .k { color: var(--muted); font-size: 12px; }
+  .v { font-size: 15px; font-weight: 600; word-break: break-word; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  #msg { min-height: 1.4em; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { text-align: left; padding: 6px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; border-top: 0; }
+  .success { color: var(--ok); } .failed, .signed-out { color: var(--bad); } .partial { color: var(--warn); }
+  pre { margin: 0; max-height: 340px; overflow: auto; font: 12px/1.4 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+  .table-wrap { overflow-x: auto; }
+  #screen { display: none; }
+  #screen iframe { width: 100%; aspect-ratio: 1366 / 768; border: 1px solid var(--line); border-radius: 8px; background: #000; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card row" style="justify-content: space-between">
+    <h1>Reward Routine</h1>
+    <div class="row">
+      <button class="primary" id="run">Run now</button>
+      <button id="login">Open browser for sign-in</button>
+      <button id="check">Check sign-in</button>
+      <button id="close">Close browser</button>
+      <button id="screenBtn">Show screen</button>
+    </div>
+  </div>
+  <div id="msg"></div>
+  <div class="card">
+    <h2>Status</h2>
+    <div class="grid">
+      <div><div class="k">State</div><div class="v" id="phase">-</div></div>
+      <div><div class="k">Next run</div><div class="v" id="next">-</div></div>
+      <div><div class="k">Daily time</div><div class="v" id="time">-</div></div>
+      <div><div class="k">Browser</div><div class="v" id="browser">-</div></div>
+    </div>
+    <div class="k" style="margin-top:8px" id="detail"></div>
+  </div>
+  <div class="card" id="screen">
+    <h2>Browser screen</h2>
+    <iframe id="vnc" title="Browser screen"></iframe>
+  </div>
+  <div class="card">
+    <h2>Recent runs</h2>
+    <div class="table-wrap"><table><thead><tr><th>Day</th><th>Result</th><th>Points</th><th>Detail</th></tr></thead><tbody id="runs"></tbody></table></div>
+  </div>
+  <div class="card">
+    <h2>Log</h2>
+    <pre id="log"></pre>
+  </div>
+</main>
+<script>
+  // Relative URLs throughout so the page works behind Home Assistant ingress.
+  const base = location.pathname.replace(/[^/]*$/, '')
+  const $ = (id) => document.getElementById(id)
+  const fmt = (iso) => iso ? new Date(iso).toLocaleString() : '-'
+  const num = (n) => Number.isFinite(n) ? n.toLocaleString() : '?'
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+
+  async function call(path, label) {
+    $('msg').textContent = label + '...'
+    try {
+      const r = await fetch(base + path, { method: 'POST' })
+      const j = await r.json()
+      $('msg').textContent = j.ok ? (j.message || label + ': done') : 'Error: ' + j.error
+    } catch (e) { $('msg').textContent = 'Error: ' + e.message }
+    refresh()
+  }
+
+  function showScreen(on) {
+    $('screen').style.display = on ? 'block' : 'none'
+    $('screenBtn').textContent = on ? 'Hide screen' : 'Show screen'
+    if (on && !$('vnc').src) {
+      const wsPath = (base + 'vnc/websockify').replace(/^\//, '')
+      $('vnc').src = base + 'vnc/vnc.html?autoconnect=1&reconnect=1&resize=scale&path=' + encodeURIComponent(wsPath)
+    }
+    if (!on) $('vnc').removeAttribute('src')
+  }
+
+  $('run').onclick = () => call('api/run', 'Starting a run')
+  $('login').onclick = async () => { await call('api/login/open', 'Opening the sign-in browser'); showScreen(true) }
+  $('check').onclick = () => call('api/login/check', 'Checking sign-in (takes ~20s)')
+  $('close').onclick = () => call('api/browser/close', 'Closing the browser')
+  $('screenBtn').onclick = () => showScreen($('screen').style.display !== 'block')
+
+  async function refresh() {
+    try {
+      const s = await (await fetch(base + 'api/status')).json()
+      $('phase').textContent = s.phase + (s.attempt ? ` (attempt ${s.attempt})` : '')
+      $('next').textContent = fmt(s.nextRunAt)
+      $('time').textContent = `${s.runTime} ${s.timezone}${s.jitterMin ? ` +0-${s.jitterMin} min` : ''}`
+      $('browser').textContent = s.browser || 'closed'
+      $('detail').textContent = [s.message, s.progress?.action].filter(Boolean).join(' | ')
+      $('run').disabled = s.busy
+      $('runs').innerHTML = s.runs.map((r) => `<tr><td>${esc(r.day)}<br><span class="k">${esc(r.trigger)}</span></td>` +
+        `<td class="${esc(r.outcome)}">${esc(r.outcome)}</td>` +
+        `<td>${r.afterPoints != null ? `${num(r.beforePoints)} &rarr; ${num(r.afterPoints)}${r.gained != null ? ` (+${num(r.gained)})` : ''}` : '-'}</td>` +
+        `<td>${esc(r.error || r.detail || '')}</td></tr>`).join('') || '<tr><td colspan="4" class="k">No runs yet</td></tr>'
+      const pre = $('log')
+      const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20
+      pre.textContent = s.log.join('\n')
+      if (atBottom) pre.scrollTop = pre.scrollHeight
+    } catch (e) { $('phase').textContent = 'unreachable' }
+  }
+  refresh()
+  setInterval(refresh, 5000)
+</script>
+</body>
+</html>

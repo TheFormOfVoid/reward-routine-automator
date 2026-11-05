@@ -1,0 +1,10 @@
+.git
+.env
+data
+**/node_modules
+**/dist
+src-cupcake
+src-donut
+src-eclair
+src-froyo
+src-gingerbread/tests
