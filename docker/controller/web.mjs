@@ -81,6 +81,7 @@ export function startWebServer(cfg, actions) {
           '/api/login/open': actions.openLogin,
           '/api/login/check': actions.checkLogin,
           '/api/browser/close': actions.closeBrowser,
+          '/api/notify/test': actions.testNotify,
         }[url.pathname]
         if (route) return send(res, 200, await route())
       }

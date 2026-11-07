@@ -41,6 +41,7 @@
       <button id="check">Check sign-in</button>
       <button id="close">Close browser</button>
       <button id="screenBtn">Show screen</button>
+      <button id="testNotify">Send test notification</button>
     </div>
   </div>
   <div id="msg"></div>
@@ -99,7 +100,8 @@
   $('login').onclick = async () => { await call('api/login/open', 'Opening the sign-in browser'); showScreen(true) }
   $('check').onclick = () => call('api/login/check', 'Checking sign-in (takes ~20s)')
   $('close').onclick = () => call('api/browser/close', 'Closing the browser')
-  $('screenBtn').onclick = () => showScreen($('screen').style.display !== 'block')
+  $('testNotify').onclick = () => call('api/notify/test', 'Sending a test notification')
+  $('screenBtn').onclick =() => showScreen($('screen').style.display !== 'block')
 
   async function refresh() {
     try {

@@ -23,6 +23,15 @@ same way; today's run then starts as soon as you press **Close browser**.
 Set **Daily run time** on the Configuration tab and restart the add-on. The
 time is in Home Assistant's timezone unless you set **Timezone**.
 
+## Notifications
+
+With **Notify my phone** on (the default), every run sends a notification to
+the Home Assistant app on your phone: points earned, balance, which steps ran,
+how long it took and when the next run is. Failures and "sign-in needed" are
+sent as high-priority. Tapping the notification opens the Rewards panel. Set
+**Phone notify service** to pick one phone; empty sends to every phone with
+the app. Turn off **Notify on success** to hear only about problems.
+
 ## What a run does
 
 The controller starts Chromium, checks that you are signed in, starts the

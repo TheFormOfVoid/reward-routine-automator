@@ -1,5 +1,5 @@
 name: Reward Routine
-version: "1.0.0"
+version: "1.2.0"
 slug: reward_routine
 description: Runs the Reward Routine Automator browser extension once a day in Chromium, with a sign-in screen in the sidebar.
 url: https://github.com/entropy63/reward-routine-automator
@@ -14,6 +14,8 @@ ingress_port: 8099
 ingress_stream: true
 panel_icon: mdi:gift-outline
 panel_title: Rewards
+# Phone notifications go through Home Assistant's notify.mobile_app_* services.
+homeassistant_api: true
 # The browser profile holds a live Microsoft sign-in; keep caches out of
 # backups (they are large and rebuild themselves).
 backup_exclude:
@@ -29,8 +31,10 @@ options:
   timeout_minutes: 90
   max_attempts: 3
   retry_delay_minutes: 15
+  incomplete_retry_minutes: 120
   catch_up: true
-  notify_on_success: false
+  notify_phone: true
+  notify_on_success: true
 schema:
   run_time: match(^([01]?[0-9]|2[0-3]):[0-5][0-9]$)
   timezone: str?
@@ -38,6 +42,9 @@ schema:
   timeout_minutes: int(10,360)
   max_attempts: int(1,10)
   retry_delay_minutes: int(1,240)
+  incomplete_retry_minutes: int(0,720)
   catch_up: bool
+  notify_phone: bool
+  notify_service: str?
   notify_url: str?
   notify_on_success: bool

@@ -16,13 +16,22 @@ configuration:
     description: How many times to try when a run fails or ends incomplete.
   retry_delay_minutes:
     name: Retry delay (minutes)
-    description: Wait before retry N is this times N.
+    description: After a failure (browser crash, timeout), wait this times the attempt number before retrying.
+  incomplete_retry_minutes:
+    name: Incomplete-run retry (minutes)
+    description: When a run ends with work not yet credited (usually Microsoft crediting search points late), try once more after this long. 0 never retries it.
   catch_up:
     name: Catch up missed runs
     description: If the add-on starts after today's time and today has not run, run soon.
+  notify_phone:
+    name: Notify my phone
+    description: Push every run's result to the Home Assistant app on your phone(s).
+  notify_service:
+    name: Phone notify service
+    description: Optional, e.g. notify.mobile_app_my_phone. Leave empty to notify every phone with the Home Assistant app.
   notify_url:
     name: Notification URL
-    description: Optional. An ntfy topic URL gets a push; any other URL gets a JSON POST. Sent on failures and when a sign-in is needed.
+    description: Optional. An ntfy topic URL gets a push; any other URL gets a JSON POST. Also sent on failures and when a sign-in is needed.
   notify_on_success:
     name: Notify on success
     description: Also notify after each successful run.

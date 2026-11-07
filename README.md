@@ -331,7 +331,9 @@ node docker/make-ha-addon.mjs \homeassistant.local\addons\reward_routine
    while on a Raspberry Pi.
 4. Start it and open **Rewards** in the sidebar to sign in.
 
-The daily time is on the add-on's Configuration tab and uses Home Assistant's
+Every run sends its result (points, steps, time taken, next run) to the
+Home Assistant app on your phone; failures and "sign-in needed" come through
+as high priority. The daily time is on the add-on's Configuration tab and uses Home Assistant's
 timezone unless you set one there. `ha-addon/DOCS.md` has the details.
 
 Automating Microsoft Rewards is against Microsoft's Rewards terms. Microsoft

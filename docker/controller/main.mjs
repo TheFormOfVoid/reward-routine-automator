@@ -51,7 +51,49 @@ function recentRuns(limit = 15) {
 
 // ---------- notifications ----------
 
+// Home Assistant phone notifications (add-on only): the Companion app's
+// notify.mobile_app_* services, called through the Supervisor's Core API
+// proxy. With no service configured, every mobile_app target gets it.
+async function haNotifyServices() {
+  if (cfg.notifyService) return [cfg.notifyService.replace(/^notify\./, '')]
+  const res = await fetch('http://supervisor/core/api/services', { headers: { Authorization: `Bearer ${process.env.SUPERVISOR_TOKEN}` } })
+  if (!res.ok) throw new Error(`listing services: HTTP ${res.status}`)
+  const domains = await res.json()
+  const notifyDomain = domains.find((d) => d.domain === 'notify')
+  return Object.keys(notifyDomain?.services || {}).filter((s) => s.startsWith('mobile_app_'))
+}
+
+async function notifyPhone(title, message, priority) {
+  if (!cfg.haAddon || !cfg.notifyPhone || !process.env.SUPERVISOR_TOKEN) return
+  try {
+    const services = await haNotifyServices()
+    if (!services.length) { log.warn('Phone notification skipped: no notify.mobile_app_* service (is the Home Assistant app installed on your phone?)'); return }
+    for (const service of services) {
+      const res = await fetch(`http://supervisor/core/api/services/notify/${encodeURIComponent(service)}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.SUPERVISOR_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title,
+          message,
+          data: {
+            tag: 'reward-routine',
+            group: 'reward-routine',
+            ...(priority === 'high' ? { priority: 'high', ttl: 0 } : {}),
+            clickAction: '/local_reward_routine',
+            url: '/local_reward_routine',
+          },
+        }),
+      })
+      if (!res.ok) log.warn(`Phone notification via notify.${service} failed: HTTP ${res.status}`)
+      else log.info(`Phone notification sent via notify.${service}`)
+    }
+  } catch (e) {
+    log.warn(`Phone notification failed: ${e.message}`)
+  }
+}
+
 async function notify(title, message, priority = 'default') {
+  await notifyPhone(title, message, priority)
   if (!cfg.notifyUrl) return
   try {
     const isNtfy = /ntfy/i.test(cfg.notifyUrl)
@@ -62,6 +104,22 @@ async function notify(title, message, priority = 'default') {
   } catch (e) {
     log.warn(`Notification failed: ${e.message}`)
   }
+}
+
+// Short, phone-sized text: what ran, what it earned, how long it took.
+function phoneSummary(result, error) {
+  if (!result) return error?.message || 'No result'
+  const n = (v) => (Number.isFinite(v) ? v.toLocaleString('en-US') : '?')
+  const parts = []
+  if (Number.isFinite(result.afterPoints)) {
+    parts.push(result.gained != null ? `+${n(result.gained)} points (balance ${n(result.afterPoints)})` : `Balance ${n(result.afterPoints)} points`)
+  }
+  const ran = (result.events || []).filter((e) => e.outcome === 'started').map((e) => e.step)
+  if (ran.length) parts.push(`Ran: ${[...new Set(ran)].join(', ')}`)
+  if (result.durationMs) parts.push(`Took ${Math.max(1, Math.round(result.durationMs / 60000))} min`)
+  if (result.status !== 'completed') parts.push(`Status: ${result.status}${result.detail ? ` - ${result.detail}` : ''}`)
+  if (error && result.status === 'completed') parts.push(error.message)
+  return parts.join('\n') || result.detail || result.status
 }
 
 // ---------- display stack (Xvfb + x11vnc + websockify) ----------
@@ -150,6 +208,13 @@ async function runRoutine(trigger) {
   log.info(`===== Run started (${trigger}) for ${day} =====`)
   let result = null
   let lastError = null
+  // Two kinds of retry. A failure (browser crash, timeout, routine never
+  // started) is retried soon. An "incomplete" run already searched and was
+  // re-checked by the extension's own recovery round, so the usual cause is
+  // Microsoft crediting search points late; searching again right away only
+  // piles up uncredited searches (141 for 20 on 2026-11-06). So an incomplete
+  // run gets one more try, after a long pause.
+  let incompleteRetries = 0
   try {
     for (let attempt = 1; attempt <= cfg.maxAttempts && !shuttingDown; attempt++) {
       status.phase = 'running'
@@ -170,7 +235,15 @@ async function runRoutine(trigger) {
         status.progress = null
       }
       if (attempt < cfg.maxAttempts && !shuttingDown) {
-        const waitMin = cfg.retryDelayMin * attempt
+        let waitMin = cfg.retryDelayMin * attempt
+        if (result && result.status === 'incomplete' && lastError?.message?.includes('incomplete')) {
+          if (cfg.incompleteRetryMin === 0 || incompleteRetries >= 1) {
+            log.info('Not retrying an incomplete run again today; the extension already re-checked it')
+            break
+          }
+          incompleteRetries++
+          waitMin = cfg.incompleteRetryMin
+        }
         status.phase = 'waiting-retry'
         status.message = `Retrying in ${waitMin} minutes`
         log.info(`Retrying in ${waitMin} minutes`)
@@ -200,9 +273,10 @@ async function runRoutine(trigger) {
   status.message = `Last run: ${outcome} - ${summary}`
   log.info(`===== Run ${outcome.toUpperCase()}: ${summary} =====`)
 
-  if (outcome === 'signed-out') await notify('Rewards: sign-in needed', lastError.message, 'high')
-  else if (!ok) await notify(`Rewards run ${outcome}`, summary, 'high')
-  else if (cfg.notifyOnSuccess) await notify('Rewards run done', summary, 'low')
+  const next = nextRun().toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  if (outcome === 'signed-out') await notify('Rewards: sign-in needed', `${lastError.message}\nNext try: ${next}`, 'high')
+  else if (!ok) await notify(`Rewards run ${outcome}`, `${phoneSummary(result, lastError)}\nNext run: ${next}`, 'high')
+  else if (cfg.notifyOnSuccess) await notify('Rewards run done', `${phoneSummary(result)}\nNext run: ${next}`, 'low')
   return { ok: true, outcome }
 }
 
@@ -270,6 +344,11 @@ const actions = {
     } finally {
       if (!wasOpen) await browser.close()
     }
+  },
+  testNotify: async () => {
+    const next = nextRun().toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+    await notify('Rewards: test notification', `Notifications work. Next run: ${next}`, 'default')
+    return { ok: true, message: 'Test notification sent (see the log for delivery)' }
   },
   closeBrowser: async () => {
     if (busy) return { ok: false, error: 'A run is in progress' }
